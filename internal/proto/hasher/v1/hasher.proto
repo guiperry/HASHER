@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package hasher.v1;
+
+option go_package = "hasher/proto/hasher/v1;hasherv1";
+
+// hasherService provides ASIC computation services
+service hasherService {
+  // ComputeHash computes a single SHA-256 hash
+  rpc ComputeHash(ComputeHashRequest) returns (ComputeHashResponse);
+  
+  // ComputeBatch computes multiple SHA-256 hashes in a batch
+  rpc ComputeBatch(ComputeBatchRequest) returns (ComputeBatchResponse);
+  
+  // StreamCompute streams hash computations for high-throughput scenarios
+  rpc StreamCompute(stream StreamComputeRequest) returns (stream StreamComputeResponse);
+  
+  // GetMetrics retrieves performance metrics from eBPF
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  
+  // GetDeviceInfo retrieves ASIC device information
+  rpc GetDeviceInfo(GetDeviceInfoRequest) returns (GetDeviceInfoResponse);
+
+  // MineWork performs mining on a Bitcoin-style header to find a valid nonce
+  rpc MineWork(MineWorkRequest) returns (MineWorkResponse);
+}
+
+// ComputeHashRequest contains data for single hash computation
+message ComputeHashRequest {
+  // Data to hash (arbitrary bytes)
+  bytes data = 1;
+}
+
+// ComputeHashResponse contains the computed hash and latency info
+message ComputeHashResponse {
+  // Computed SHA-256 hash (32 bytes)
+  bytes hash = 1;
+  
+  // Operation latency in microseconds
+  uint64 latency_us = 2;
+}
+
+// ComputeBatchRequest contains multiple data items to hash
+message ComputeBatchRequest {
+  // Array of data items to hash
+  repeated bytes data = 1;
+  
+  // Maximum batch size (optional, defaults to 256)
+  // Server will process in optimal hardware batches
+  uint32 max_batch_size = 2;
+}
+
+// ComputeBatchResponse contains all computed hashes
+message ComputeBatchResponse {
+  // Array of computed hashes (same order as input)
+  repeated bytes hashes = 1;
+  
+  // Total operation latency in microseconds
+  uint64 total_latency_us = 2;
+  
+  // Number of hashes successfully processed
+  uint32 processed_count = 3;
+}
+
+// StreamComputeRequest is sent by client in streaming mode
+message StreamComputeRequest {
+  // Data to hash
+  bytes data = 1;
+  
+  // Client-provided request ID for correlation
+  uint64 request_id = 2;
+}
+
+// StreamComputeResponse is returned by server in streaming mode
+message StreamComputeResponse {
+  // Computed hash
+  bytes hash = 1;
+  
+  // Request ID from the original request
+  uint64 request_id = 2;
+  
+  // Operation latency in microseconds
+  uint64 latency_us = 3;
+}
+
+// GetMetricsRequest requests performance metrics
+message GetMetricsRequest {
+  // Reserved for future use (e.g., time range filters)
+}
+
+// GetMetricsResponse contains aggregated performance metrics
+message GetMetricsResponse {
+  // Total number of hash requests processed
+  uint64 total_requests = 1;
+  
+  // Total bytes processed across all requests
+  uint64 total_bytes_processed = 2;
+  
+  // Average latency in microseconds
+  uint64 average_latency_us = 3;
+  
+  // Peak latency in microseconds
+  uint64 peak_latency_us = 4;
+  
+  // Total number of errors encountered
+  uint64 total_errors = 5;
+  
+  // Cache hit count (reserved for future use)
+  uint64 cache_hits = 6;
+  
+  // Cache miss count (reserved for future use)
+  uint64 cache_misses = 7;
+  
+  // Device-specific statistics
+  map<string, uint64> device_stats = 8;
+}
+
+// GetDeviceInfoRequest requests device information
+message GetDeviceInfoRequest {
+  // Empty for now
+}
+
+// GetDeviceInfoResponse contains ASIC device information
+message GetDeviceInfoResponse {
+  // Device file path (e.g., /dev/bitmain-asic)
+  string device_path = 1;
+  
+  // Number of chips in the ASIC
+  uint32 chip_count = 2;
+  
+  // Firmware version string
+  string firmware_version = 3;
+  
+  // Whether device is operational
+  bool is_operational = 4;
+  
+  // Server uptime in seconds
+  uint64 uptime_seconds = 5;
+}
+
+// MineWorkRequest contains data for mining a nonce
+message MineWorkRequest {
+  // 80-byte Bitcoin-style block header
+  bytes header = 1;
+  
+  // Starting nonce value for search
+  uint32 nonce_start = 2;
+  
+  // Ending nonce value for search
+  uint32 nonce_end = 3;
+}
+
+// MineWorkResponse contains the found nonce
+message MineWorkResponse {
+  // The first valid nonce found
+  uint32 nonce = 1;
+  
+  // Operation latency in microseconds
+  uint64 latency_us = 2;
+}

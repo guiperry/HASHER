@@ -1,0 +1,90 @@
+# Build directory
+bin/
+
+# Logs directory
+logs/
+
+# Other binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Legacy outputs (root level - deprecated)
+diagnostics_*.txt
+probe_*.txt
+/tmp/
+
+# Go build cache
+*.test
+*.out
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+.zencoder/
+.zenflow/
+.env
+
+# Toolchain (OpenWrt SDK)
+toolchain/
+device-discover
+
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test coverage
+*.out
+coverage.txt
+
+# Go workspace file
+go.work
+
+# eBPF compiled objects
+*.o
+*.bpf.o
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files
+*.pb.go
+*_grpc.pb.go
+
+# Build artifacts
+dist/
+build/
+
+# Logs
+*.log
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+
