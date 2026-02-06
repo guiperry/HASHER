@@ -624,7 +624,7 @@ func (d *USBDevice) buildTxConfigPacket() []byte {
 	packet[25] = 0x00
 
 	// Calculate and append CRC over bytes 0-25
-	crc := calculateCRC16(packet[0:26])
+	crc := CalculateCRC16(packet[0:26])
 	binary.LittleEndian.PutUint16(packet[26:28], crc)
 
 	return packet
@@ -658,7 +658,7 @@ func (d *USBDevice) buildRxStatusPacket() []byte {
 	packet[13] = 0x00
 
 	// Calculate and append CRC over bytes 0-13
-	crc := calculateCRC16(packet[0:14])
+	crc := CalculateCRC16(packet[0:14])
 	binary.LittleEndian.PutUint16(packet[14:16], crc)
 
 	return packet

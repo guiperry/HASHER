@@ -18,10 +18,11 @@ PROTO_DIR=internal/proto
 PROTO_OUT=.
 
 # eBPF parameters
-EBPF_SRC=internal/ebpf/hasher.bpf.c
-EBPF_OUT=internal/ebpf/hasher.bpf.o
+EBPF_SRCS=internal/ebpf/tracer.bpf.c internal/ebpf/nonce_batcher.bpf.c
+EBPF_OBJS=$(EBPF_SRCS:.c=.o)
 CLANG=clang
 LLVM_STRIP=llvm-strip
+
 
 .PHONY: all build clean test proto ebpf deps help build-asic-test build-probe build-probe build-probe-v2 build-protocol-discover build-monitor build-diagnostics deploy deploy-probe deploy-probe-v2 deploy-protocol-discover deploy-monitor deploy-diagnostics cli test-cli build-all build-server-mips build-host build-host-all embed-binaries build-crypto-transformer train-crypto-transformer run-crypto-transformer build-simple-hash run-simple-hash
 
@@ -69,14 +70,15 @@ proto:
 		$(PROTO_DIR)/hasher/v1/*.proto
 
 ## ebpf: Compile eBPF programs
-ebpf: $(EBPF_OUT)
+ebpf: $(EBPF_OBJS)
 
-$(EBPF_OUT): $(EBPF_SRC)
-	@echo "Compiling eBPF program..."
+%.bpf.o: %.bpf.c
+	@echo "Compiling eBPF program $<..."
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_x86 \
 		-I/usr/include/bpf \
-		-c $(EBPF_SRC) -o $(EBPF_OUT)
-	$(LLVM_STRIP) -g $(EBPF_OUT)
+		-Iinternal/ebpf \
+		-c $< -o $@
+	$(LLVM_STRIP) -g $@
 
 ## generate: Generate all code (proto, ebpf, go generate)
 generate: proto ebpf
@@ -116,7 +118,7 @@ build-monitor-diagnostics:
 cli:
 	@echo "Creating build directory..."
 	@mkdir -p $(CLI_BUILD_DIR)
-	@echo "Building $(CLI_BINARY_NAME)..."
+	@echo "Building $(CLI_BINARY_NAME) CLI Tool..."
 	@go build $(GOFLAGS) -o $(CLI_BUILD_DIR)/$(CLI_BINARY_NAME) $(CLI_SRC_DIR)
 	@echo "Binary created successfully at $(CLI_BUILD_DIR)/$(CLI_BINARY_NAME)"
 
@@ -315,7 +317,7 @@ embed-binaries: build-driver
 
 
 ## build: Build all components
-build: build-driver cli
+build: generate build-driver cli
 	@echo "✅ All components built"
 
 ## test-training: Test training functionality
