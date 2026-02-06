@@ -14,7 +14,7 @@ Hasher transforms obsolete Bitcoin mining hardware (Antminer S2/S3) into a novel
 **Network:**
 - IP: 192.168.12.151
 - User: root
-- Password: keperu100 (hardcoded in scripts)
+- Password: ********* 
 
 ## Architecture Notes
 

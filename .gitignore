@@ -27,6 +27,8 @@ go.work
 *.swp
 *.swo
 *~
+# Agents
+.claude
 
 # OS
 .DS_Store
@@ -36,6 +38,7 @@ Thumbs.db
 .zencoder/
 .zenflow/
 .env
+dev.env
 
 # Toolchain (OpenWrt SDK)
 toolchain/
@@ -79,6 +82,7 @@ dist/
 build/
 
 # Logs
+logs
 *.log
 
 # Docker
@@ -87,4 +91,6 @@ build/
 # Temporary files
 tmp/
 temp/
+
+internal/host/embedded/hasher-server-mips
 

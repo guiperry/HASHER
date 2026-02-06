@@ -70,7 +70,7 @@ cd KNIRVHASHER
 Create or update `.env` file:
 ```bash
 DEVICE_IP=192.168.12.151
-DEVICE_PASSWORD=keperu100
+DEVICE_PASSWORD=*********
 ```
 
 ### 3. Setup Toolchain

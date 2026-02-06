@@ -121,7 +121,7 @@ func (d *KernelDevice) buildTxConfigPacket() []byte {
 	packet[25] = 0x00
 
 	// CRC
-	crc := calculateCRC16(packet[:26])
+	crc := CalculateCRC16(packet[:26])
 	binary.LittleEndian.PutUint16(packet[26:28], crc)
 
 	return packet
@@ -150,7 +150,7 @@ func (d *KernelDevice) buildRxStatusPacket() []byte {
 	packet[13] = 0x00
 
 	// CRC
-	crc := calculateCRC16(packet[:14])
+	crc := CalculateCRC16(packet[:14])
 	binary.LittleEndian.PutUint16(packet[14:16], crc)
 
 	return packet
@@ -176,9 +176,10 @@ func (d *KernelDevice) ReadPacket(buffer []byte, timeout time.Duration) (int, er
 		return 0, fmt.Errorf("device not open")
 	}
 
-	// Set read deadline
+	// Set read deadline (ignore error if not supported)
 	if err := d.file.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return 0, fmt.Errorf("failed to set deadline: %w", err)
+		// Character devices often don't support deadlines, so ignore this error
+		log.Printf("Warning: cannot set read deadline on device (continuing): %v", err)
 	}
 
 	n, err := d.file.Read(buffer)

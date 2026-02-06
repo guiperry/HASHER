@@ -1,3 +1,10 @@
+// Hasher: Neural Inference Engine Powered by SHA-256 ASICs
+// Copyright (C) 2026  Guillermo Perry
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 package main
 
 import (
@@ -18,6 +25,7 @@ import (
 	"hasher/internal/analyzer"
 	"hasher/internal/cli/embedded"
 	"hasher/internal/cli/ui"
+	"hasher/internal/config"
 )
 
 const (
@@ -229,13 +237,22 @@ func startHasherHost(logChan chan string) (*exec.Cmd, bool, int) {
 	logChan <- fmt.Sprintf("Starting hasher-host from %s...", hostPath)
 
 	// Build hasher-host arguments
-	args := []string{
-		"--device=192.168.12.151",
-		"--discover=false",
-		"--force-redeploy=true",
-	}
+	var args []string
 
-	logChan <- fmt.Sprintf("Using device 192.168.12.151 (discovery disabled, force-redeploy enabled)")
+	// Check if device configuration is available
+	deviceConfig, err := config.LoadDeviceConfig()
+	if err == nil && deviceConfig.IP != "" {
+		// Device is configured, use it
+		args = append(args, "--device="+deviceConfig.IP)
+		args = append(args, "--discover=false")
+		args = append(args, "--force-redeploy=true")
+		logChan <- fmt.Sprintf("Using configured device %s (discovery disabled, force-redeploy enabled)", deviceConfig.IP)
+	} else {
+		// No device configuration, enable discovery for auto-detection
+		args = append(args, "--discover=true")
+		args = append(args, "--auto-deploy=true")
+		logChan <- "No device configuration found - enabling network discovery and auto-deployment"
+	}
 
 	// Start hasher-host with configured arguments
 	cmd := exec.Command(hostPath, args...)

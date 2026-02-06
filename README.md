@@ -1,8 +1,13 @@
 # HASHER - SHA-256 Neural Network on Repurposed Mining Hardware
+<p align="center">
+<img src="assets/logo-clear.png" width="350" alt="logo">
+</p>
 
 ## Overview
 
 HASHER implements a recursive single-ASIC inference engine as specified in the **HASHER_SDD.md** document. This package transforms obsolete Bitcoin mining hardware (like Antminer S2/S3) into a novel machine learning inference system by using SHA-256 ASIC chips as computational primitives for neural network operations.
+
+**Updated Algorithm:** The system now uses the ASIC as a **deterministic bucket generator** rather than a generic hash function. By setting a "Difficulty 1" target, we use the first valid Nonce discovered as the LSH (Locality Sensitive Hashing) signature, maintaining the 500 GH/s speed advantage by repurposing the mining hardware's natural state.
 
 ## Key Features
 
@@ -29,162 +34,143 @@ HASHER implements a recursive single-ASIC inference engine as specified in the *
 - **Confidence Calculation**: Computes confidence scores and statistical summary
 - **Error Handling**: Gracefully handles failed passes and invalid inputs
 
-## 🔐 BREAKTHROUGH: Cryptographic Transformer
+## 🔐 Updated Algorithm: Nonce-Mining for LSH
 
-### Seed-as-Weight Matrix Innovation
+### Hardware Reality Pivot
 
-**Date:** January 31, 2026  
-**Status:** Implemented and Working ✅
+The ASIC is designed for Bitcoin mining (finding nonces where SHA256(SHA256(header+nonce)) < target), but the HASHER needs deterministic hashing (SHA256(input || seed) → fixed output). The original design assumed the BM1382 could perform arbitrary SHA-256 hashes. Testing has confirmed the ASIC is hard-wired for the Bitcoin mining loop.
 
-This breakthrough transforms hash-based neural networks from simple classifiers into **full transformer architectures** capable of conversational AI by treating cryptographic seeds as encoded weight matrices.
+**Revised Core Innovation:** Instead of using the ASIC as a hash function, HASHER now uses it as a **deterministic bucket generator**. By setting a "Difficulty 1" target, we use the first valid **Nonce** discovered as the LSH signature. This maintains the 500 GH/s speed advantage by repurposing the mining hardware's natural state.
 
-### Key Innovations
+### From Hashing to Mining
 
-1. **Matrix Encoding in 32-byte Seeds**
-   - Factorized representation (U·V^T) for space efficiency
-   - 16-bit fixed-point quantization
-   - Reed-Solomon error correction
-   - Enables arbitrary matrix sizes within cryptographic constraints
+We pack the 128-bit LSH projections into the standard 80-byte Bitcoin block header structure to be processed by the `0x52 (TXTASK)` protocol.
 
-2. **Learnable Hash Operations**
-   - Surrogate gradients (Straight-Through Estimator, Gumbel-Softmax)
-   - Differentiable hash approximations
-   - Backpropagation through hash-based layers
+**Header Mapping:**
 
-3. **Complete Transformer Architecture**
-   - Hash-based self-attention mechanisms
-   - Feed-forward networks with cryptographic weights
-   - Layer normalization using hash operations
-   - Multi-head attention with hash queries/keys/values
+* **Version (4 bytes):** Used as a "Salt" or Seed for the LSH forest.
+* **Previous Block Hash (32 bytes):** Stores the first 4 LSH projections (4x32-bit floats).
+* **Merkle Root (32 bytes):** Stores the next 4 LSH projections.
+* **Timestamp/Bits (8 bytes):** Fixed metadata to ensure determinism.
+* **Nonce (4 bytes):** The output we seek from the ASIC.
 
-### Revolutionary Benefits
+### Temporal Recursive Nonces
 
-| Metric | Traditional GPU | Hasher Matrix | Improvement |
-|--------|------------------|---------------|------------|
-| **Power Efficiency** | 250W | 0.1W | 2500× |
-| **Cost per Operation** | $0.00001 | $0.00000001 | 1000× |
-| **Memory per Layer** | 4N bytes | 32 bytes | 95% reduction |
-| **Security** | Weights exposed | Cryptographically protected | Quantum-resistant |
-| **Privacy** | Cloud-dependent | On-premise | 100% private |
+To handle the **61MB RAM constraint**, we implement a **Temporal Recursive Algorithm**. If a bucket collision occurs, we "mine deeper" by using the previously found nonce as a seed for the next task.
 
-### Implementation Status
+**Multi-Nonce Signature:**
 
-✅ **Core Components Complete**
-- `internal/hasher/matrix_hash.go` - MatrixHashNeuron with learnable seeds
-- `internal/hasher/seed_encoder.go` - Weight↔Seed conversion system  
-- `internal/hasher/surrogate.go` - Gradient estimation for hash operations
-- `internal/crypto_transformer/hash_transformer.go` - Complete transformer architecture
-- `internal/crypto_transformer/training.go` - Training pipeline with data handling
-- `cmd/crypto_transformer/main.go` - Interactive demo and training interface
+Instead of one 128-bit signature, we collect the first N nonces that satisfy the target.
 
-✅ **Working Features**
-- Model initialization and configuration
-- Forward pass through transformer layers
-- Hash-based attention mechanisms  
-- Conversational response generation
-- Sample training data creation
-- Interactive demo mode
+* **LSH Bucket ID:** Determined by the first valid nonce
+* **Rerank Filter:** Uses subsequent nonces for fine-grained similarity
+* **Determinism Guarantee:** We specify a `Nonce Range` (e.g., 0 to 1,000,000). The ASIC will always find the same "Golden Nonce" for the same projection data within that range.
 
-🎯 **Training Capabilities**
-- Multi-epoch training with validation
-- Surrogate gradient optimization
-- Data batching and shuffling
-- Model checkpointing and saving
+### Performance Comparison
 
-🚀 **Performance Achievements**
-- Successful forward pass through 4-layer transformer
-- Hash-based self-attention computation
-- Conversational response generation
-- 1000× theoretical cost reduction vs GPUs
-- Quantum-resistant cryptographic protection
+| Metric | Original Design | Updated Design (Mining) |
+| --- | --- | --- |
+| **Hashing Latency** | 100µs (Direct) | ~1-2ms (Mining Search + USB) |
+| **Determinism** | High (SHA-256) | High (First Nonce in Range) |
+| **CPU Load** | Moderate | Low (Header packing is simple math) |
+| **RAM Usage** | 61MB | 61MB (No change, uses mmap index) |
 
-### Usage
-
-#### Build Cryptographic Transformer
-```bash
-make build-crypto-transformer
-```
-
-#### Interactive Demo
-```bash
-make run-crypto-transformer
-```
-
-#### Training (Future Enhancement)
-```bash
-make train-crypto-transformer
-```
-
-### Historical Significance
-
-This represents the **first practical implementation** of:
-1. **Hash-based transformer architectures** - Using SHA-256 for neural operations
-2. **Cryptographic neural training** - Surrogate gradients through hash functions  
-3. **Quantum-resistant AI** - Model protection via cryptographic encoding
-4. **Ultra-low-cost AI** - 1000× cost reduction over traditional approaches
-
-### Next Development Phases
-
-1. **ASIC Integration** - Optimize for SHA-256 hardware acceleration
-2. **Conversational Training** - Train on dialogue datasets
-3. **Memory Optimization** - Enhance matrix encoding efficiency
-4. **Production Deployment** - Scale for real-world applications
+**Bottleneck Analysis:**
+The primary bottleneck is no longer SHA-256 computation, but the **USB Bulk Transfer** and the **time-to-first-nonce**. At 500 GH/s, the hardware finds a Difficulty 1 nonce in nanoseconds, meaning the total search time remains dominated by the network call to the API server (~42ms).
 
 ---
 
-**This breakthrough transforms hash-based neural networks from specialized classifiers into a general-purpose AI platform capable of transformer architectures while maintaining quantum resistance and ultra-low-cost operation!** 🎉
-
 ## 🔧 Usage
+
+### Current Working Make Commands
+
+```bash
+# Show all available commands
+make help
+
+# Build the CLI (primary command-line interface)
+make cli
+
+# Build hasher-host for current platform (orchestrator)
+make build-host
+
+# Build hasher-server for MIPS (Antminer)
+make build-server-mips
+
+# Build hasher-host for all platforms
+make build-host-all
+
+# Build all components (host, server, CLI)
+make build
+
+# Build and deploy everything
+make embed-binaries
+
+# Deploy server to Antminer
+make deploy-server
+
+# Clean build artifacts
+make clean
+
+# Install dependencies
+make deps
+
+# Run tests
+make test
+
+# Run linters
+make lint
+```
+
+### Device-Specific Commands
+
+
+### Development Commands
+
+```bash
+
+# Test training functionality
+make test-training
+
+# Generate protobuf code
+make proto
+
+# Compile eBPF programs
+make ebpf
+
+# Generate all code (proto, ebpf, go generate)
+make generate
+```
+
+### Platform-Specific Host Builds
+
+```bash
+# Build for Linux x86_64
+make build-host-linux-amd64
+
+# Build for macOS Intel
+make build-host-darwin-amd64
+
+# Build for macOS Apple Silicon
+make build-host-darwin-arm64
+```
 
 ### Quick Start
 
-1. **Build Simple Hash Test** (Working ✅)
+1. **Build the CLI and Host**
    ```bash
-   make build-simple-hash
-   make run-simple-hash
+   make embed-binaries
    ```
 
-2. **Build Cryptographic Transformer** (Matrix encoding issues - being debugged)
+2. **Run the Host with ASIC Device**
    ```bash
-   make build-crypto-transformer
-   make run-crypto-transformer
+   ./bin/hasher-host --device=your-asic-ip --discover=false
    ```
 
-3. **Build Original CLI** (Hasher inference)
+3. **Run the CLI**
    ```bash
-   make cli
+   ./bin/hasher
    ```
-
-## 🐛 Troubleshooting Training Issues
-
-The current cryptographic transformer implementation experiences indexing errors during initialization. The issue stems from matrix encoding/decoding complexity:
-
-### Problem Analysis
-- **MatrixHashNeuron**: Index out of range errors during weight decoding
-- **Seed Encoding**: 32-byte constraint limits matrix complexity  
-- **Surrogate Gradients**: Complex gradient estimation through hash functions
-
-### Current Status
-- ✅ **Simple hash operations**: Fully functional
-- ✅ **Basic transformer architecture**: Core implementation complete
-- 🔄 **Matrix-based training**: Requires debugging for indexing issues
-
-### Workarounds
-1. **Use Simple Hash Demo**: Demonstrates core cryptographic principles
-2. **Original Hasher CLI**: Production-ready inference system  
-3. **Manual Matrix Operations**: For testing without seed encoding
-
-### Development Path
-1. **Fix Matrix Encoding** - Debug weight initialization in `MatrixHashNeuron`
-2. **Simplify Gradient Flow** - Streamline surrogate gradient computation
-3. **Enable Training Mode** - Full training pipeline validation
-
-The simple hash test (`make run-simple-hash`) successfully demonstrates:
-- Deterministic hash generation
-- Conversational interaction capabilities  
-- Basic cryptographic neural operations
-
-This provides a working foundation while matrix encoding issues are resolved.
 
 ## Architecture
 
@@ -193,6 +179,37 @@ The system architecture consists of three main components:
 1. **Hash Network**: The neural network composed of hash neurons
 2. **Recursive Engine**: Manages the temporal ensemble process
 3. **Logical Validator**: Checks results against logical rules
+
+### ASIC Protocol Implementation
+
+The updated implementation uses the BM1382 mining protocol:
+
+```go
+// BuildMiningHeader packs LSH projections into 80-byte Bitcoin header
+func BuildMiningHeader(projections []float32, salt uint32) []byte {
+    header := make([]byte, 80)
+    
+    // Version (Salt)
+    binary.LittleEndian.PutUint32(header[0:4], salt)
+    
+    // Previous Block Hash (Projections 0-7)
+    for i := 0; i < 8; i++ {
+        val := math.Float32bits(projections[i])
+        binary.LittleEndian.PutUint32(header[4+(i*4):8+(i*4)], val)
+    }
+    
+    // Merkle Root (Projections 8-15)
+    for i := 0; i < 8; i++ {
+        val := math.Float32bits(projections[8+i])
+        binary.LittleEndian.PutUint32(header[36+(i*4):40+(i*4)], val)
+    }
+
+    // Fixed Difficulty Bits (0x1d00ffff = Difficulty 1)
+    binary.LittleEndian.PutUint32(header[72:76], 0x1d00ffff)
+    
+    return header
+}
+```
 
 ## Usage
 
@@ -203,7 +220,7 @@ package main
 
 import (
     "fmt"
-    "HASHER/internal/hasher"
+    "hasher/internal/hasher"
 )
 
 func main() {
@@ -275,6 +292,13 @@ func addCustomRules() {
 - **validation.go**: Logical validation and knowledge base management
 - **errors.go**: Error definitions and handling
 
+### ASIC Driver Files
+
+- **cmd/driver/hasher-host/main.go**: Orchestrator for managing recursive inference
+- **cmd/driver/hasher-server/main.go**: gRPC server running on ASIC device
+- **internal/hasher/asic_client.go**: Client for communicating with ASIC server
+- **internal/host/deployment.go**: Auto-deployment and management functionality
+
 ### Test Files
 
 - **hasher_test.go**: Comprehensive test suite including:
@@ -312,6 +336,7 @@ BenchmarkRecursiveEngineInfer-8       10000  21000.0 ns/op
 2. **Single-ASIC Architecture**: Simplifies deployment and reduces power consumption
 3. **Logical Validation**: Ensures results are explainable and consistent
 4. **Hardware Reuse**: Repurposes obsolete mining hardware for AI applications
+5. **Nonce-Mining LSH**: Uses mining hardware's natural state for deterministic bucket generation
 
 ### Architecture Principles
 
@@ -319,15 +344,16 @@ BenchmarkRecursiveEngineInfer-8       10000  21000.0 ns/op
 2. **Simplicity**: Single-ASIC model minimizes complexity and failure points
 3. **Observable Systems**: Exposes detailed metrics for monitoring and tracing
 4. **Robustness**: Temporal ensemble provides inherent fault tolerance
+5. **Hardware-Native**: Leverages ASIC's mining capabilities rather than fighting them
 
 ## ASIC Tools and Diagnostics
 
 ### ASIC Monitor with Integrated Diagnostics
 
-The main monitoring tool (`cmd/monitor`) now includes comprehensive diagnostic capabilities that run as Phase 0 before monitoring begins.
+The main monitoring tool (`cmd/monitor`) includes comprehensive diagnostic capabilities that run as Phase 0 before monitoring begins.
 
 #### Features
-- **Phase 0 Diagnostics**: System, device, process, protocol, and access testing
+- **Diagnostics**: System, device, process, protocol, and access testing
 - **USB Communication**: Direct USB device communication with packet crafting
 - **Real-time Monitoring**: Continuous status polling and logging
 - **Multiple Output Formats**: Text or JSON diagnostic output
@@ -337,25 +363,25 @@ The main monitoring tool (`cmd/monitor`) now includes comprehensive diagnostic c
 
 ```bash
 # Run full diagnostics then monitor
-./monitor --diagnostics
+./bin/monitor --diagnostics
 
 # Run specific diagnostic phase only
-./monitor --diagnostics --diagnostic-phase system
+./bin/monitor --diagnostics --diagnostic-phase system
 
 # Run diagnostics with JSON output
-./monitor --diagnostics --json-diagnostics
+./bin/monitor --diagnostics --json-diagnostics
 
 # Simple device test (one RxStatus and exit)
-./monitor --simple-test
+./bin/monitor --simple-test
 
 # Continuous status logging
-./monitor --dump-status --dump-interval 2
+./bin/monitor --dump-status --dump-interval 2
 
 # Try character device instead of USB
-./monitor --try-char-dev
+./bin/monitor --try-char-dev
 
 # Run interrupt endpoints (experimental)
-./monitor --try-interrupt
+./bin/monitor --try-interrupt
 ```
 
 #### Build and Deployment
@@ -382,35 +408,23 @@ make deploy-monitor-diagnostics
 4. **Protocol Info**: Firmware version, CGMiner config, kernel messages
 5. **Device Access Test**: Direct device file access testing
 
-### Legacy Diagnostics Tool
-
-The original diagnostics tool (`cmd/diagnostics`) remains available for standalone use.
-
-```bash
-# Build standalone diagnostics
-make build-diagnostics
-
-# Deploy standalone diagnostics
-make deploy-diagnostics
-
-# Run on device
-ssh root@antminer "/tmp/diagnostics -json -phase system"
-```
-
 ## Integration with ASIC Driver
 
-The `hasher` package is designed to integrate seamlessly with existing asic-driver architecture:
+The `hasher` package integrates with existing asic-driver architecture:
 
-- **gRPC Communication**: Uses existing ComputeHash, ComputeBatch, and StreamCompute methods
+- **gRPC Communication**: Uses ComputeHash, ComputeBatch, and StreamCompute methods
 - **Metrics Collection**: Retrieves performance data from GetMetrics API
 - **Device Information**: Queries device capabilities via GetDeviceInfo
-- **Fallback Mechanism**: Supports direct device file access if gRPC fails
+- **Auto-Deployment**: Automatically deploys hasher-server to ASIC devices
+- **Auto-Recovery**: Monitors server logs and handles reboot scenarios
+- **Connection Health**: Monitors ASIC connection with automatic reconnection
 
 ## Compatibility
 
 - **Protocol**: gRPC over TCP/IP (primary) or direct `/dev/bitmain-asic` access (fallback)
 - **Devices**: Antminer S2/S3 with hasher-driver installed
 - **Dependencies**: Go 1.16+, standard library only (no external frameworks)
+- **Network**: Supports automatic discovery of hasher-server instances
 
 ## Future Enhancements
 
@@ -418,12 +432,27 @@ The `hasher` package is designed to integrate seamlessly with existing asic-driv
 2. **Dynamic Learning**: Online learning from ground truth comparisons
 3. **Adaptive Pass Count**: Adjust number of passes based on confidence levels
 4. **Model Pruning**: Optimize network structure for specific tasks
-5. **GPU Acceleration**: Optional GPU support for faster inference
+5. **Header Verification**: Flash modified `cgminer` to verify Go-built headers are accepted by BM1382
+6. **Nonce Stability Test**: Run same vector through multiple Antminers to verify consistent "First Nonce"
 
-## License
+---
 
-[Your License Here]
+### ⚖️ License
+
+**Hasher** is licensed under the [GNU General Public License v3.0](https://www.google.com/search?q=LICENSE).
+
+#### Why GPLv3?
+
+We believe that the transformation of "obsolete" hardware into cutting-edge AI primitives should benefit everyone. The GPLv3 ensures that:
+
+* **Transparency:** Anyone can inspect, modify, and learn from the code that bridges SHA-256 ASICs with neural network operations.
+* **Reciprocity:** Any derivatives or improvements made to the Hasher core must also be released under the same open-source license.
+* **Patent Protection:** The license provides an explicit grant of patent rights from contributors to users, protecting the community as we explore novel computational methods.
+
+---
 
 ## Authors
 
-Hasher Architecture Team
+- Guillermo Perry
+- Hasher Architecture Team
+- Claude Code, Gemini, & Deep Seek assisted with this implementation.

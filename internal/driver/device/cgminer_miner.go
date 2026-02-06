@@ -33,7 +33,8 @@ func NewCGMinerMiner() *CGMinerMiner {
 
 // IsAvailable checks if CGMiner is running and responding
 func (c *CGMinerMiner) IsAvailable() bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cgminerHost, cgminerPort), 2*time.Second)
+	addr := net.JoinHostPort(cgminerHost, fmt.Sprintf("%d", cgminerPort))
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return false
 	}
@@ -55,7 +56,7 @@ func (c *CGMinerMiner) sendCommand(command string, params ...interface{}) (map[s
 		return nil, fmt.Errorf("failed to marshal command: %w", err)
 	}
 
-	addr := fmt.Sprintf("%s:%d", cgminerHost, cgminerPort)
+	addr := net.JoinHostPort(cgminerHost, fmt.Sprintf("%d", cgminerPort))
 	conn, err := net.DialTimeout("tcp", addr, cgminerTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to cgminer: %w", err)

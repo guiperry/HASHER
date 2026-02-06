@@ -3,6 +3,8 @@ package transformer
 import (
 	"hasher/internal/hasher"
 	"math"
+
+	"hasher/internal/driver/device"
 )
 
 // HasherTransformer implements transformer architecture with hash-based layers
@@ -15,6 +17,9 @@ type HasherTransformer struct {
 	Norm          []*hasher.MatrixHashNeuron
 	SeedEncoder   *hasher.MatrixSeedEncoder
 	Surrogate     *hasher.SurrogateGradient
+	OutputLayer   *hasher.MatrixHashNeuron // Cached output projection layer
+	AsicDriver       *device.EBPFDriver     // ASIC driver for hardware acceleration
+	SoftwareEmulator *hasher.SoftwareASICEmulator // Software emulator for algorithmic testing
 }
 
 // HasherAttentionBlock implements self-attention with hash operations
@@ -42,26 +47,28 @@ type TransformerConfig struct {
 }
 
 // NewHasherTransformer creates a new hash-based transformer
-func NewHasherTransformer(config *TransformerConfig) *HasherTransformer {
+func NewHasherTransformer(config *TransformerConfig, driver *device.EBPFDriver, emulator *hasher.SoftwareASICEmulator) *HasherTransformer {
 	seedEncoder := hasher.NewMatrixSeedEncoder()
 	surrogate := hasher.NewSurrogateGradient("ste") // Straight-through estimator
 
 	model := &HasherTransformer{
-		Config:      config,
-		SeedEncoder: seedEncoder,
-		Surrogate:   surrogate,
+		Config:           config,
+		SeedEncoder:      seedEncoder,
+		Surrogate:        surrogate,
+		AsicDriver:       driver,
+		SoftwareEmulator: emulator,
 	}
 
 	// Initialize embeddings
 	model.Embeddings = make([]*hasher.MatrixHashNeuron, config.VocabSize)
 	for i := 0; i < config.VocabSize; i++ {
-		model.Embeddings[i] = hasher.NewMatrixHashNeuron(1, config.EmbedDim, config.Activation)
+		model.Embeddings[i] = hasher.NewMatrixHashNeuron(1, config.EmbedDim, config.Activation, driver, emulator)
 	}
 
 	// Initialize positional encoding (hash-based)
 	model.PositionalEnc = make([]*hasher.MatrixHashNeuron, config.ContextLen)
 	for i := 0; i < config.ContextLen; i++ {
-		model.PositionalEnc[i] = hasher.NewMatrixHashNeuron(1, config.EmbedDim, config.Activation)
+		model.PositionalEnc[i] = hasher.NewMatrixHashNeuron(1, config.EmbedDim, config.Activation, driver, emulator)
 	}
 
 	// Initialize transformer layers
@@ -71,13 +78,15 @@ func NewHasherTransformer(config *TransformerConfig) *HasherTransformer {
 
 	for i := 0; i < config.NumLayers; i++ {
 		// Self-attention block
-		model.Attention[i] = NewHasherAttentionBlock(config, seedEncoder, surrogate)
+		model.Attention[i] = NewHasherAttentionBlock(config, seedEncoder, surrogate, driver, emulator)
 
 		// Feed-forward network
 		model.FeedForward[i] = hasher.NewMatrixHashNeuron(
 			config.EmbedDim,
 			config.FFNHiddenDim,
 			config.Activation,
+			driver,
+			emulator,
 		)
 
 		// Layer normalization (pre and post)
@@ -85,11 +94,15 @@ func NewHasherTransformer(config *TransformerConfig) *HasherTransformer {
 			config.EmbedDim,
 			config.EmbedDim,
 			"hash",
+			driver,
+			emulator,
 		)
 		model.Norm[i*2+1] = hasher.NewMatrixHashNeuron(
 			config.EmbedDim,
 			config.EmbedDim,
 			"hash",
+			driver,
+			emulator,
 		)
 	}
 
@@ -97,14 +110,14 @@ func NewHasherTransformer(config *TransformerConfig) *HasherTransformer {
 }
 
 // NewHasherAttentionBlock creates a new hash-based attention block
-func NewHasherAttentionBlock(config *TransformerConfig, seedEncoder *hasher.MatrixSeedEncoder, surrogate *hasher.SurrogateGradient) *HasherAttentionBlock {
+func NewHasherAttentionBlock(config *TransformerConfig, seedEncoder *hasher.MatrixSeedEncoder, surrogate *hasher.SurrogateGradient, driver *device.EBPFDriver, emulator *hasher.SoftwareASICEmulator) *HasherAttentionBlock {
 	headDim := config.EmbedDim / config.NumHeads
 
 	return &HasherAttentionBlock{
-		QueryWeights:  hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation),
-		KeyWeights:    hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation),
-		ValueWeights:  hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation),
-		OutputWeights: hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation),
+		QueryWeights:  hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation, driver, emulator),
+		KeyWeights:    hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation, driver, emulator),
+		ValueWeights:  hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation, driver, emulator),
+		OutputWeights: hasher.NewMatrixHashNeuron(config.EmbedDim, config.EmbedDim, config.Activation, driver, emulator),
 		NumHeads:      config.NumHeads,
 		HeadDim:       headDim,
 		SeedEncoder:   seedEncoder,
@@ -116,6 +129,11 @@ func NewHasherAttentionBlock(config *TransformerConfig, seedEncoder *hasher.Matr
 func (ht *HasherTransformer) Forward(tokenIDs []int) []float32 {
 	seqLen := len(tokenIDs)
 	embedDim := ht.Config.EmbedDim
+
+	// Handle empty context - return zero embedding
+	if seqLen == 0 {
+		return make([]float32, embedDim)
+	}
 
 	// Embedding lookup
 	embeddings := make([][]float32, seqLen)
@@ -229,6 +247,9 @@ func (ht *HasherTransformer) applyLayerNorm(hidden [][]float32, normIdx int) [][
 // ForwardAttention implements self-attention forward pass
 func (hab *HasherAttentionBlock) Forward(hidden [][]float32) [][]float32 {
 	seqLen := len(hidden)
+	if seqLen == 0 {
+		return make([][]float32, 0)
+	}
 	embedDim := len(hidden[0])
 	headDim := hab.HeadDim
 	numHeads := hab.NumHeads
@@ -306,13 +327,26 @@ func (ht *HasherTransformer) GenerateToken(context []int, temperature float32) (
 	// Forward pass
 	hidden := ht.Forward(context)
 
-	// Project to vocabulary (simplified - would need output layer)
+	// Initialize output layer if not exists (lazy initialization)
+	if ht.OutputLayer == nil {
+		ht.OutputLayer = hasher.NewMatrixHashNeuron(len(hidden)+1, ht.Config.VocabSize, "hash", ht.AsicDriver, ht.SoftwareEmulator)
+	}
+
+	// Create input with bias token
+	fullInput := make([]float32, len(hidden)+1)
+	copy(fullInput, hidden)
+	fullInput[len(hidden)] = 0.0 // Add bias
+
+	// Project to vocabulary using matrix multiplication instead of per-token loops
+	outputs := ht.OutputLayer.Forward(fullInput)
+
+	// Extract the first output (simplified - for now use first row)
 	tokenScores := make([]float32, ht.Config.VocabSize)
-	for i := 0; i < ht.Config.VocabSize; i++ {
-		input := append(hidden, float32(i))
-		outputLayer := hasher.NewMatrixHashNeuron(len(hidden)+1, 1, "hash")
-		result := outputLayer.Forward(input)
-		tokenScores[i] = result[0]
+	for i := 0; i < ht.Config.VocabSize && i < len(outputs); i++ {
+		tokenScores[i] = outputs[i]
+	}
+	for i := len(outputs); i < ht.Config.VocabSize; i++ {
+		tokenScores[i] = float32(0) // Fill remaining vocab with zeros
 	}
 
 	// Apply temperature and sample
@@ -361,4 +395,3 @@ func (ht *HasherTransformer) GenerateToken(context []int, temperature float32) (
 	}
 	return maxIdx, tokenScores
 }
-

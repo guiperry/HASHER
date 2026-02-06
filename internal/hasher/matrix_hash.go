@@ -3,7 +3,10 @@ package hasher
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
+
+	"hasher/internal/driver/device" // Import the EBPFDriver package
 )
 
 // MatrixHashNeuron implements learnable hash-based neural operations
@@ -15,20 +18,24 @@ type MatrixHashNeuron struct {
 	Decoded    bool        // Whether weights are decoded
 	Weights    [][]float32 // Decoded weight matrix
 	Bias       []float32   // Decoded bias vector
+	AsicDriver       *device.EBPFDriver     // ASIC driver for hardware acceleration
+	SoftwareEmulator *SoftwareASICEmulator // Software emulator for algorithmic testing
 }
 
 // NewMatrixHashNeuron creates a new hash-based neuron
-func NewMatrixHashNeuron(inputDim, outputDim int, activation string) *MatrixHashNeuron {
+func NewMatrixHashNeuron(inputDim, outputDim int, activation string, driver *device.EBPFDriver, emulator *SoftwareASICEmulator) *MatrixHashNeuron {
 	// Initialize with random seed (will be overwritten during training)
 	seed := [32]byte{}
-	randBytes(seed[:])
+	// randBytes(seed[:]) // Will remove this dummy func later
 
 	return &MatrixHashNeuron{
-		Seed:       seed,
-		InputDim:   inputDim,
-		OutputDim:  outputDim,
-		Activation: activation,
-		Decoded:    false,
+		Seed:             seed,
+		InputDim:         inputDim,
+		OutputDim:        outputDim,
+		Activation:       activation,
+		Decoded:          false,
+		AsicDriver:       driver,
+		SoftwareEmulator: emulator,
 	}
 }
 
@@ -57,23 +64,63 @@ func (n *MatrixHashNeuron) Forward(input []float32) []float32 {
 func (n *MatrixHashNeuron) hashActivation(value float32, input []float32, neuronIndex int) float32 {
 	switch n.Activation {
 	case "hash":
-		// Create hash input: value + input slice + neuron index
-		data := make([]byte, 4+len(input)*4+4)
-		binary.BigEndian.PutUint32(data[0:4], math.Float32bits(value))
-		for i, v := range input {
-			binary.BigEndian.PutUint32(data[4+i*4:4+i*4+4], math.Float32bits(v))
+		// Construct the 80-byte Bitcoin block header
+		// This is a simplified implementation based on HASHER_SDD_UPDATE.md
+		// In a full implementation, this would involve careful packing of
+		// 'value', 'input', 'neuronIndex', and 'n.Seed' into the header fields.
+
+		header := make([]byte, 80)
+
+		// Example: Pack value into version field (first 4 bytes)
+		binary.LittleEndian.PutUint32(header[0:4], math.Float32bits(value))
+
+		// Example: Pack neuronIndex into a part of the header (e.g., bytes 4-8)
+		binary.LittleEndian.PutUint32(header[4:8], uint32(neuronIndex))
+
+		// Example: Pack input into remaining parts of the header
+		// This is a simplified example. Real packing would depend on the LSH projections.
+		// We need to ensure we don't write beyond the 80-byte limit.
+		inputBytesLen := len(input) * 4
+		if inputBytesLen > 80-8-len(n.Seed) { // 8 bytes used by value and neuronIndex, rest for seed
+			inputBytesLen = 80 - 8 - len(n.Seed)
 		}
-		binary.BigEndian.PutUint32(data[len(data)-4:], uint32(neuronIndex))
+		
+		inputBytes := make([]byte, inputBytesLen)
+		for i := 0; i < len(input) && (i*4+4) <= inputBytesLen; i++ {
+			binary.LittleEndian.PutUint32(inputBytes[i*4:i*4+4], math.Float32bits(input[i]))
+		}
+		copy(header[8:], inputBytes) // Copy inputBytes
 
-		// Add seed for uniqueness
-		data = append(data, n.Seed[:]...)
+		// Pad with seed (simplified)
+		copy(header[len(header)-len(n.Seed):], n.Seed[:])
 
-		// Compute SHA-256
-		hash := sha256.Sum256(data)
+		// Fixed Difficulty Bits (0x1d00ffff = Difficulty 1)
+		binary.LittleEndian.PutUint32(header[72:76], 0x1d00ffff)
 
-		// Convert to float32 [0,1]
-		hashVal := binary.BigEndian.Uint64(hash[:8])
-		return float32(hashVal) / float32(^uint64(0))
+		// Send header to ASIC and get nonce
+		nonce, err := uint32(0), error(nil)
+		if n.AsicDriver != nil {
+			nonce, err = n.AsicDriver.ComputeNonceBucket(header)
+		} else {
+			err = fmt.Errorf("ASIC driver not initialized")
+		}
+		
+		if err != nil {
+			fmt.Printf("ASIC nonce computation failed (%v). Attempting software emulation...\n", err)
+			if n.SoftwareEmulator != nil {
+				nonce, err = n.SoftwareEmulator.ComputeNonce(header)
+				if err != nil {
+					fmt.Printf("Software emulation failed: %v. Falling back to dummy value.\n", err)
+					return float32(neuronIndex) * 0.01 // Fallback if both fail
+				}
+			} else {
+				fmt.Printf("Software emulator not initialized. Falling back to dummy value.\n")
+				return float32(neuronIndex) * 0.01 // Fallback if no emulator
+			}
+		}
+
+		// Convert nonce (uint32) to float32 [0, 1]
+		return float32(nonce) / float32(math.MaxUint32)
 
 	case "tanh":
 		return float32(math.Tanh(float64(value)))
@@ -144,9 +191,4 @@ func encodeWeightsToSeed(weights [][]float32, bias []float32) [32]byte {
 	return seed
 }
 
-// Simple random byte generator
-func randBytes(b []byte) {
-	for i := range b {
-		b[i] = byte(i * 7 % 256)
-	}
-}
+

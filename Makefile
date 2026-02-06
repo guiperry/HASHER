@@ -27,7 +27,7 @@ LLVM_STRIP=llvm-strip
 
 ANTMINER_IP ?= $(shell [ -f .env ] && source .env && echo $$DEVICE_IP || echo 192.168.12.151)
 ANTMINER_USER ?= root
-ANTMINER_PASSWORD ?= $(shell [ -f .env ] && source .env && echo $$DEVICE_PASSWORD || echo keperu100)
+ANTMINER_PASSWORD ?= $(shell [ -f .env ] && source .env && echo $$DEVICE_PASSWORD || echo *********)
 
 SDK_ROOT := $(CURDIR)/toolchain/openwrt-sdk-19.07.10-ar71xx-generic_gcc-7.5.0_musl.Linux-x86_64
 

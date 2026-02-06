@@ -60,7 +60,7 @@ func (c *CGMinerClient) SendCommand(command string, params ...interface{}) (map[
 	}
 
 	// Connect to CGMiner
-	addr := fmt.Sprintf("%s:%d", c.host, c.port)
+	addr := net.JoinHostPort(c.host, fmt.Sprintf("%d", c.port))
 	conn, err := net.DialTimeout("tcp", addr, CGMinerTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to cgminer at %s: %w", addr, err)

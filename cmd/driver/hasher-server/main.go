@@ -1,5 +1,10 @@
-// cmd/driver/hasher-server/main.go
-// Hasher Server - runs on ASIC device and exposes gRPC service for hash computations
+// Hasher: Neural Inference Engine Powered by SHA-256 ASICs
+// Copyright (C) 2026  Guillermo Perry
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 package main
 
 import (
@@ -30,100 +35,71 @@ var (
 	autoReboot    = flag.Bool("auto-reboot", true, "automatically reboot on fatal device errors")
 )
 
-// attemptDeviceRecovery attempts to open the ASIC device with all available strategies.
-// If all strategies fail and auto-reboot is enabled, it triggers a system reboot.
-func attemptDeviceRecovery(enableTracing bool) (*device.Device, error) {
-	log.Printf("Attempting device recovery with multiple strategies...")
+// ensureCGMinerRunning checks if CGMiner is running and restarts it if needed
+func ensureCGMinerRunning() error {
+	log.Printf("Checking CGMiner status...")
 
-	// Try to open device directly first
-	dev, err := device.OpenDevice(enableTracing)
-	if err == nil {
-		log.Printf("Device opened successfully via OpenDevice")
-		return dev, nil
-	}
+	// Check if CGMiner process is running
+	cmd := exec.Command("sh", "-c", "ps | grep cgminer | grep -v grep")
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		log.Printf("CGMiner process found, checking API...")
 
-	log.Printf("Initial device open failed: %v", err)
-
-	// Check if the error is recoverable (device busy/locked)
-	if !isRecoverableError(err) {
-		return nil, fmt.Errorf("non-recoverable device error: %w", err)
-	}
-
-	// Strategy 1: Wait and retry with exponential backoff
-	log.Printf("Strategy 1: Waiting and retrying with exponential backoff...")
-	backoff := 500 * time.Millisecond
-	maxBackoff := 5 * time.Second
-	for attempt := 0; attempt < 5; attempt++ {
-		time.Sleep(backoff)
-		dev, err = device.OpenDevice(enableTracing)
-		if err == nil {
-			log.Printf("Device opened successfully after backoff (attempt %d)", attempt+1)
-			return dev, nil
+		// Check if API is responding
+		if cmd := exec.Command("sh", "-c", "echo '{\"command\":\"version\"}' | nc 127.0.0.1 4028"); cmd.Run() == nil {
+			log.Printf("✓ CGMiner is running and API is responding")
+			return nil
 		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-	}
-	log.Printf("Backoff retry strategy failed after 5 attempts")
 
-	// Strategy 2: Try to unload kernel module and retry
-	log.Printf("Strategy 2: Attempting kernel module unload...")
-	if err := unloadKernelModule(); err == nil {
-		time.Sleep(2 * time.Second) // Wait for device release
-		dev, err = device.OpenDevice(enableTracing)
-		if err == nil {
-			log.Printf("Device opened successfully after kernel module unload")
-			return dev, nil
-		}
-		// Try to reload module for next strategies
-		reloadKernelModule()
+		log.Printf("CGMiner running but API not responding, will restart...")
 	} else {
-		log.Printf("Kernel module unload failed: %v", err)
+		log.Printf("CGMiner not found, starting...")
 	}
 
-	// Strategy 3: Check for competing processes and kill them
-	log.Printf("Strategy 3: Checking for competing processes...")
-	killCompetingProcesses()
-	time.Sleep(1 * time.Second)
-	dev, err = device.OpenDevice(enableTracing)
-	if err == nil {
-		log.Printf("Device opened successfully after killing competing processes")
-		return dev, nil
+	// Kill any existing CGMiner processes
+	exec.Command("sh", "-c", "killall cgminer 2>/dev/null").Run()
+	time.Sleep(2 * time.Second)
+
+	// Start CGMiner with proper options
+	startCmd := exec.Command("sh", "-c", "cgminer --api-allow W:127.0.0.1 --api-listen --bitmain-options 115200:32:8:16:250:0982 --benchmark -o http://dummy.pool:8080 -u dummyuser -p dummypass > /tmp/cgminer.log 2>&1 &")
+	if err := startCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start CGMiner: %w", err)
 	}
-	log.Printf("Process cleanup strategy failed")
 
-	// All strategies failed - trigger reboot if enabled
-	if *autoReboot {
-		log.Printf("AUTO_REBOOT_TRIGGERED: attempting system reboot to clear kernel module lock")
-		log.Printf("All device recovery strategies failed. Initiating system reboot...")
-
-		// Give time for logs to flush
-		time.Sleep(1 * time.Second)
-
-		// Sync filesystem before reboot
-		syscall.Sync()
-
-		// Trigger forced reboot
-		cmd := exec.Command("reboot", "-f")
-		output, cmdErr := cmd.CombinedOutput()
-		if cmdErr != nil {
-			// If forced reboot fails, try regular reboot
-			log.Printf("Forced reboot failed (%v: %s), trying regular reboot...", cmdErr, string(output))
-			cmd = exec.Command("reboot")
-			output, cmdErr = cmd.CombinedOutput()
-			if cmdErr != nil {
-				return nil, fmt.Errorf("all recovery strategies failed and reboot failed: %w (output: %s)", cmdErr, string(output))
-			}
+	// Wait for CGMiner to initialize and API to become available
+	for i := 0; i < 10; i++ {
+		time.Sleep(2 * time.Second)
+		if cmd := exec.Command("sh", "-c", "echo '{\"command\":\"version\"}' | nc 127.0.0.1 4028"); cmd.Run() == nil {
+			log.Printf("✓ CGMiner API is responding after restart")
+			return nil
 		}
-
-		// Reboot command succeeded, but we should never reach here
-		// Give the system time to reboot
-		time.Sleep(30 * time.Second)
-		return nil, fmt.Errorf("reboot command executed but process still running")
+		log.Printf("Waiting for CGMiner API... (attempt %d/10)", i+1)
 	}
 
-	return nil, fmt.Errorf("all recovery strategies failed and auto-reboot is disabled: %w", err)
+	return fmt.Errorf("CGMiner failed to start or API not responding after 20 seconds")
+}
+
+// attemptDeviceRecovery attempts to open the ASIC device with CGMiner priority.
+// It ensures CGMiner is running before attempting any device access.
+func attemptDeviceRecovery(enableTracing bool) (*device.Device, error) {
+	log.Printf("Attempting device recovery with CGMiner-first strategy...")
+
+	// Primary Strategy: Ensure CGMiner is running and use it
+	log.Printf("Primary Strategy: Ensuring CGMiner is available...")
+	cgminerErr := ensureCGMinerRunning()
+	if cgminerErr == nil {
+		log.Printf("✓ CGMiner is available, attempting to open device...")
+		// Try to open device (CGMiner should be detected and prioritized)
+		dev, err := device.OpenDevice(enableTracing)
+		if err == nil {
+			log.Printf("✓ Device opened successfully with CGMiner mode")
+			return dev, nil
+		}
+		log.Printf("Failed to open device even with CGMiner running: %v", err)
+		return nil, fmt.Errorf("CGMiner available but device open failed: %w", err)
+	}
+
+	// If CGMiner setup failed, log and return error
+	return nil, fmt.Errorf("failed to ensure CGMiner availability: %w", cgminerErr)
 }
 
 // isRecoverableError checks if the error is recoverable through retry/reboot
