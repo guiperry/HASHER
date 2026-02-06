@@ -439,7 +439,7 @@ The `hasher` package integrates with existing asic-driver architecture:
 
 ### ⚖️ License
 
-**Hasher** is licensed under the [GNU General Public License v3.0](https://www.google.com/search?q=LICENSE).
+**Hasher** is licensed under the [GNU General Public License v3.0](https://github.com/guiperry/HASHER/blob/main/LICENSE).
 
 #### Why GPLv3?
 
