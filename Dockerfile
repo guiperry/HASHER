@@ -1,31 +1,26 @@
-# asic-driver Dockerfile - Multi-stage build
+# hasher-host Dockerfile
 
-# Stage 1: Build eBPF programs
-FROM ubuntu:22.04 AS ebpf-builder
+# Stage 1: Build Go binary (using Ubuntu to match runtime)
+FROM ubuntu:22.04 AS go-builder
 
+# Install dependencies
 RUN apt-get update && apt-get install -y \
-    clang \
-    llvm \
-    libbpf-dev \
-    linux-headers-generic \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-COPY internal/ebpf/ ./internal/ebpf/
-
-RUN clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
-    -I/usr/include/bpf \
-    -c internal/ebpf/asic-driver.bpf.c -o internal/ebpf/asic-driver.bpf.o && \
-    llvm-strip -g internal/ebpf/asic-driver.bpf.o
-
-# Stage 2: Build Go binaries
-FROM golang:1.21-alpine AS go-builder
-
-RUN apk add --no-cache \
     git \
     make \
-    protobuf \
-    protobuf-dev
+    protobuf-compiler \
+    gcc \
+    g++ \
+    libusb-1.0-0-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.24
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/* && \
+    wget -O go1.24.11.linux-amd64.tar.gz https://go.dev/dl/go1.24.11.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.11.linux-amd64.tar.gz && \
+    rm go1.24.11.linux-amd64.tar.gz
+
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 WORKDIR /build
 
@@ -35,38 +30,31 @@ RUN go mod download
 
 # Copy source code
 COPY . .
-COPY --from=ebpf-builder /build/internal/ebpf/asic-driver.bpf.o ./internal/ebpf/
 
-# Build binaries
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-    -ldflags '-s -w -extldflags "-static"' \
-    -o /bin/asic-driver-server ./cmd/asic-driver-server
+# Build hasher-host binary
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags '-s -w' \
+    -o /bin/hasher-host ./cmd/driver/hasher-host
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-    -ldflags '-s -w -extldflags "-static"' \
-    -o /bin/asic-driver-client ./cmd/asic-driver-client
-
-# Stage 3: Runtime image
+# Stage 2: Runtime image
 FROM ubuntu:22.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
-    libbpf0 \
     ca-certificates \
+    libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binaries
-COPY --from=go-builder /bin/asic-driver-server /usr/local/bin/
-COPY --from=go-builder /bin/asic-driver-client /usr/local/bin/
-COPY --from=ebpf-builder /build/internal/ebpf/asic-driver.bpf.o /opt/asic-driver/
+# Copy binary
+COPY --from=go-builder /bin/hasher-host /usr/local/bin/
 
-# Create non-root user (server needs root for eBPF)
-RUN useradd -m -u 1000 asic-driver
+# Create non-root user
+RUN useradd -m -u 1000 hasher-host
 
-WORKDIR /home/asic-driver
+WORKDIR /home/hasher-host
 
-# Expose gRPC port
-EXPOSE 80
+# Expose API port
+EXPOSE 8080
 
 # Default command
-CMD ["asic-driver-server"]
+CMD ["hasher-host"]
