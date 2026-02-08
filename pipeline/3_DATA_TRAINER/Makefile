@@ -1,0 +1,198 @@
+.PHONY: all build test clean install run lint format help
+
+# Application name
+APP_NAME := data-trainer
+MAIN_PATH := cmd/trainer
+
+# Go build flags
+BUILD_FLAGS := -v
+LDFLAGS := -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo 'dev')"
+
+# Directories
+BUILD_DIR := bin
+COVERAGE_DIR := coverage
+
+# Go files
+GO_FILES := $(shell find . -name "*.go" -type f)
+GO_MOD_FILES := go.mod go.sum
+
+# Go tool versions
+GO_VERSION := 1.21
+GOLANGCI_LINT_VERSION := v1.54.2
+
+help: ## Show this help message
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Available targets:"
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+all: build ## Build the application
+
+build: ## Build the application binary
+	@echo "Building $(APP_NAME)..."
+	@mkdir -p $(BUILD_DIR)
+	go build $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(APP_NAME) ./$(MAIN_PATH)
+
+build-debug: ## Build the application with debug symbols
+	@echo "Building $(APP_NAME) (debug)..."
+	@mkdir -p $(BUILD_DIR)
+	go build -gcflags="all=-N -l" $(BUILD_FLAGS) -o $(BUILD_DIR)/$(APP_NAME)-debug ./$(MAIN_PATH)
+
+run: build ## Build and run the application
+	@echo "Running $(APP_NAME)..."
+	./$(BUILD_DIR)/$(APP_NAME)
+
+run-debug: build-debug ## Run the debug version
+	@echo "Running $(APP_NAME) (debug)..."
+	./$(BUILD_DIR)/$(APP_NAME)-debug
+
+test: ## Run all tests
+	@echo "Running tests..."
+	go test -v -race -coverprofile=$(COVERAGE_DIR)/coverage.out ./...
+
+test-coverage: test ## Generate test coverage report
+	@echo "Generating coverage report..."
+	go tool cover -html=$(COVERAGE_DIR)/coverage.out -o $(COVERAGE_DIR)/coverage.html
+	@echo "Coverage report generated: $(COVERAGE_DIR)/coverage.html"
+
+test-bench: ## Run benchmarks
+	@echo "Running benchmarks..."
+	go test -bench=. -benchmem ./...
+
+lint: ## Run linter
+	@echo "Running golangci-lint..."
+	@if ! command -v golangci-lint &> /dev/null; then \
+		echo "Installing golangci-lint..."; \
+		go install github.com/golangci-lint/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	fi
+	golangci-lint run
+
+format: ## Format Go code
+	@echo "Formatting Go code..."
+	go fmt ./...
+	goimports -w .
+
+vet: ## Run go vet
+	@echo "Running go vet..."
+	go vet ./...
+
+tidy: ## Tidy go modules
+	@echo "Tidying go modules..."
+	go mod tidy
+
+clean: ## Clean build artifacts
+	@echo "Cleaning..."
+	rm -rf $(BUILD_DIR)
+	rm -rf $(COVERAGE_DIR)
+	rm -f coverage.out
+	go clean -cache
+
+deps: ## Download dependencies
+	@echo "Downloading dependencies..."
+	go mod download
+	go mod verify
+
+update-deps: ## Update dependencies
+	@echo "Updating dependencies..."
+	go get -u ./...
+	go mod tidy
+
+install: build ## Install the application
+	@echo "Installing $(APP_NAME)..."
+	cp $(BUILD_DIR)/$(APP_NAME) $(GOPATH)/bin/
+
+docker-build: ## Build Docker image
+	@echo "Building Docker image..."
+	docker build -t $(APP_NAME):latest .
+
+docker-run: ## Run in Docker
+	@echo "Running $(APP_NAME) in Docker..."
+	docker run --rm -it $(APP_NAME):latest
+
+profile-cpu: ## Run CPU profiling
+	@echo "Running CPU profiling..."
+	./$(BUILD_DIR)/$(APP_NAME) -cpuprofile=$(COVERAGE_DIR)/cpu.prof
+	go tool pprof $(BUILD_DIR)/$(APP_NAME) $(COVERAGE_DIR)/cpu.prof
+
+profile-mem: ## Run memory profiling
+	@echo "Running memory profiling..."
+	./$(BUILD_DIR)/$(APP_NAME) -memprofile=$(COVERAGE_DIR)/mem.prof
+	go tool pprof $(BUILD_DIR)/$(APP_NAME) $(COVERAGE_DIR)/mem.prof
+
+race: ## Run with race detector
+	@echo "Running with race detector..."
+	go run -race ./$(MAIN_PATH)
+
+mod-check: ## Check for vulnerable dependencies
+	@echo "Checking for vulnerable dependencies..."
+	go list -json -m all | nancy sleuth
+
+security-scan: ## Run security scan
+	@echo "Running security scan..."
+	gosec ./...
+
+docs: ## Generate documentation
+	@echo "Generating documentation..."
+	godoc -http=:6060 &
+	@echo "Documentation available at http://localhost:6060"
+
+pre-commit: test lint vet ## Run all pre-commit checks
+	@echo "Pre-commit checks completed"
+
+ci: clean deps test lint vet ## Run CI pipeline
+	@echo "CI pipeline completed"
+
+check-deps: ## Check for outdated dependencies
+	@echo "Checking for outdated dependencies..."
+	go list -u -m all
+
+generate: ## Run go generate
+	@echo "Running go generate..."
+	go generate ./...
+
+tools: ## Install development tools
+	@echo "Installing development tools..."
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	go install golang.org/x/tools/cmd/goimports@latest
+	go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+	go install github.com/sonatypecommunity/nancy/cmd/nancy@latest
+
+# Development shortcuts
+dev: format tidy test build ## Full development cycle
+
+quick: format build ## Quick build with formatting
+
+watch: ## Watch for changes and rebuild
+	@echo "Watching for changes..."
+	@while inotifywait -r -e modify,create,delete .; do \
+		echo "Changes detected, rebuilding..."; \
+		make build; \
+	done
+
+# Release targets
+release: clean test lint vet build ## Full release build
+	@echo "Release build completed"
+
+version: ## Show version information
+	@echo "Go version: $(shell go version)"
+	@echo "App version: $(shell git describe --tags --always --dirty 2>/dev/null || echo 'dev')"
+	@echo "Build time: $(shell date)"
+
+# Project-specific targets
+trainer: build ## Build trainer specifically
+	@echo "Building trainer..."
+	@mkdir -p $(BUILD_DIR)
+	go build $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/trainer ./cmd/trainer
+
+run-trainer: trainer ## Run trainer
+	@echo "Running trainer..."
+	./$(BUILD_DIR)/trainer
+
+validate: ## Validate training data
+	@echo "Validating training data..."
+	go run ./cmd/validator --data-path ./data
+
+benchmark: test-bench ## Run performance benchmarks
+
+# Default target
+.DEFAULT_GOAL := help
