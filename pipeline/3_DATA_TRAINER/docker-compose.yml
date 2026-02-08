@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  hasher-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hasher/data-trainer:latest
+    container_name: hasher-trainer
+    hostname: hasher-trainer
+    
+    # GPU access for CUDA bridge
+    deploy:
+      resources:
+        reservations:
+          devices:
+            driver: nvidia
+            count: 1
+            capabilities: [gpu]
+    
+    # Environment variables
+    environment:
+      - DATA_PATH=/app/data
+      - LOG_LEVEL=info
+      - ENABLE_CUDA=true
+      - ENABLE_EBPF=true
+      - TARGET_HASH_RATE=500000000
+      - POPULATION_SIZE=128
+      - MAX_GENERATIONS=500
+      - CUDA_VISIBLE_DEVICES=0
+    
+    # Volume mounts
+    volumes:
+      - ./data:/app/data
+      - /sys/fs/bpf:/sys/fs/bpf
+    
+    # Network configuration
+    networks:
+      - hasher-network
+    
+    # Port mapping (if needed for monitoring)
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "/app/bin/data-trainer", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # User configuration
+    user: "1000:1000"
+    
+    # Working directory
+    working_dir: /app
+    
+    # Command override for development
+    command: ["./bin/data-trainer", "--epochs=10", "--population=32", "--verbose"]
+
+networks:
+  hasher-network:
+    driver: bridge
+
+volumes:
+  hasher-data:
+    driver: local
+  hasher-bpf:
+    driver: local

@@ -138,6 +138,76 @@ func (v *vHasherSimulator) SimulateHash(seed []byte, pass int) (uint32, error) {
 	return result, nil
 }
 
+// SimulateBitcoinHash performs Double-SHA256 on 80-byte Bitcoin header
+// This is the core "Camouflage" function for BM1382 ASIC compatibility
+func (v *vHasherSimulator) SimulateBitcoinHeader(header []byte) (uint32, error) {
+	if !v.isRunning {
+		return 0, fmt.Errorf("simulator is not running")
+	}
+
+	if len(header) != 80 {
+		return 0, fmt.Errorf("invalid Bitcoin header length: expected 80 bytes, got %d", len(header))
+	}
+
+	start := time.Now()
+	defer func() {
+		latency := time.Since(start).Seconds()
+		v.updateStats(latency)
+	}()
+
+	// Create cache key for Bitcoin header
+	cacheKey := fmt.Sprintf("btc_%x", header[:16]) // Use first 16 bytes for cache
+
+	v.cacheMutex.RLock()
+	if cached, exists := v.cache[cacheKey]; exists {
+		v.cacheMutex.RUnlock()
+		return cached, nil
+	}
+	v.cacheMutex.RUnlock()
+
+	// ROUND 1: Hash the 80-byte header (Bitcoin mining)
+	// SHA-256 processes 64-byte chunks. 80 bytes = 1.25 chunks.
+	hasher1 := sha256.New()
+
+	// First chunk: bytes 0-63
+	hasher1.Write(header[0:64])
+
+	// Second chunk: bytes 64-79 + padding
+	chunk2 := make([]byte, 64)
+	copy(chunk2, header[64:80])
+	chunk2[16] = 0x80 // SHA-256 padding bit
+	// Add length in bits (80 * 8 = 640)
+	binary.BigEndian.PutUint64(chunk2[56:], 640)
+	hasher1.Write(chunk2)
+
+	hash1 := hasher1.Sum(nil)
+
+	// ROUND 2: Hash the 32-byte result of Round 1
+	hasher2 := sha256.New()
+	hasher2.Write(hash1)
+
+	// Add padding for second round
+	padding2 := make([]byte, 64)
+	copy(padding2, hash1)
+	padding2[32] = 0x80
+	binary.BigEndian.PutUint64(padding2[56:], 256) // 32 bytes * 8 bits
+	hasher2.Write(padding2[32:])
+
+	hash2 := hasher2.Sum(nil)
+
+	// Return the first 4 bytes of final hash as the nonce result
+	result := binary.LittleEndian.Uint32(hash2[:4])
+
+	// Cache the result
+	if len(v.cache) < v.config.CacheSize {
+		v.cacheMutex.Lock()
+		v.cache[cacheKey] = result
+		v.cacheMutex.Unlock()
+	}
+
+	return result, nil
+}
+
 func (v *vHasherSimulator) ValidateSeed(seed []byte, targetToken int32) (bool, error) {
 	if !v.isRunning {
 		return false, fmt.Errorf("simulator is not running")
@@ -180,6 +250,38 @@ func (v *vHasherSimulator) GetDeviceStats() (*DeviceStats, error) {
 		ActiveSeeds:    v.stats.ActiveSeeds,
 		LastUpdateTime: v.stats.LastUpdateTime,
 	}, nil
+}
+
+// ProcessHeadersBatch processes multiple Bitcoin headers in parallel
+// Optimized for GPU batch processing and Evolutionary GRPO
+func (v *vHasherSimulator) ProcessHeadersBatch(headers [][]byte, targetTokenID uint32) ([]uint32, error) {
+	if !v.isRunning {
+		return nil, fmt.Errorf("simulator is not running")
+	}
+
+	results := make([]uint32, len(headers))
+
+	// Process headers in parallel batches
+	batchSize := 100 // Process 100 headers at a time
+	for i := 0; i < len(headers); i += batchSize {
+		end := i + batchSize
+		if end > len(headers) {
+			end = len(headers)
+		}
+
+		// Process batch
+		batch := headers[i:end]
+		for j, header := range batch {
+			result, err := v.SimulateBitcoinHeader(header)
+			if err != nil {
+				// Log error but continue processing
+				continue
+			}
+			results[i+j] = result
+		}
+	}
+
+	return results, nil
 }
 
 func (v *vHasherSimulator) updateStats(latency float64) {

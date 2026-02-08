@@ -1,7 +1,6 @@
 package training
 
 import (
-	"fmt"
 	"testing"
 )
 

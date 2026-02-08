@@ -94,3 +94,4 @@ temp/
 internal/host/embedded/hasher-server-mips
 
 pipeline/2_DATA_ENCODER/data-encoder
+pipeline/3_DATA_TRAINER/trainer

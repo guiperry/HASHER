@@ -1,0 +1,17 @@
+# Use the official OpenWRT rootfs for a hardware-identical environment
+FROM openwrt/rootfs:latest
+
+# Install ONLY the bare essentials needed to run the Go binary and uBPF
+RUN opkg update && opkg install libstdcpp libgcc libpthread
+
+# Copy the artifacts we built locally using the host's CUDA 10.2 toolchain
+COPY bin/data-trainer /usr/bin/data-trainer
+COPY pkg/simulator/libcuda_bridge.so /usr/lib/libcuda_bridge.so
+COPY /usr/local/lib/libubpf.so /usr/lib/libubpf.so
+
+# Set environment for the Evolutionary GRPO Harness
+ENV LD_LIBRARY_PATH=/usr/lib
+WORKDIR /app
+
+# Run the trainer as if it were on the Antminer control board
+ENTRYPOINT ["data-trainer"]

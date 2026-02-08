@@ -1,6 +1,6 @@
-.PHONY: all build test clean install run lint format help
+.PHONY: all build test clean install run lint format help toolchain build-go docker-openwrt build-cuda firmware
 
-# Application name
+# Application name 
 APP_NAME := data-trainer
 MAIN_PATH := cmd/trainer
 
@@ -19,6 +19,11 @@ GO_MOD_FILES := go.mod go.sum
 # Go tool versions
 GO_VERSION := 1.21
 GOLANGCI_LINT_VERSION := v1.54.2
+
+# Detect local CUDA 10.2
+NVCC := $(shell command -v nvcc 2> /dev/null)
+CUDA_VERSION := $(shell nvcc --version | grep "release" | awk '{call split($6,a,"v"); print a[1]}')
+
 
 help: ## Show this help message
 	@echo "Usage: make [target]"
@@ -101,13 +106,81 @@ install: build ## Install the application
 	@echo "Installing $(APP_NAME)..."
 	cp $(BUILD_DIR)/$(APP_NAME) $(GOPATH)/bin/
 
-docker-build: ## Build Docker image
-	@echo "Building Docker image..."
+
+
+
+# Build uBPF locally to ensure it matches your host architecture
+toolchain:
+	bash setup_toolchain.sh
+	
+# Compile the CUDA Bridge using YOUR local nvcc
+
+build: build-cuda
+	go build -o bin/data-trainer ./cmd/trainer/
+
+
+
+# CUDA/eBPF compilation targets
+compile-ebpf: ## Compile eBPF kernel
+	@echo "Compiling eBPF kernel..."
+	clang -O2 -target bpf -c pkg/simulator/neural_kernel.c -o pkg/simulator/neural_kernel.o
+	clang -O2 -target bpf -c pkg/simulator/neural_kernel_ubpf.c -o pkg/simulator/neural_kernel_ubpf.o
+
+compile-cuda: ## Compile CUDA bridge
+	@echo "Compiling CUDA bridge..."
+	nvcc -Xcompiler -fPIC -shared -o pkg/simulator/libcuda_bridge.so pkg/simulator/cuda_bridge.cu
+
+compile-all: compile-ebpf docker-build-native ## Compile all native components
+
+
+
+# HASHER Firmware Build
+
+
+# Build the artifacts using the local host toolchain (CUDA 10.2 + GCC)
+build-local:
+	bash setup_toolchain.sh
+
+# Package into a lean OpenWRT Rootfs for testing
+firmware: build-local
+	docker build -t hasher-openwrt:latest -f Dockerfile.openwrt .
+
+# Run the OpenWRT instance with host GPU access
+run-test:
+	docker run --rm --runtime=nvidia --gpus all \
+		-v $(PWD)/data:/app/data \
+		hasher-openwrt:latest
+
+# Docker development targets
+
+docker-build-native: ## Build Docker image to compile native components
+	@echo "Building Docker image for native component compilation..."
 	docker build -t $(APP_NAME):latest .
+
+dev-docker: ## Run development environment in Docker
+	docker-compose up --build
+
+dev-docker-bg: ## Run development environment in background
+	docker-compose up --build -d
+
+dev-docker-stop: ## Stop development environment
+	docker-compose down
+
+dev-docker-logs: ## Show development logs
+	docker-compose logs -f
 
 docker-run: ## Run in Docker
 	@echo "Running $(APP_NAME) in Docker..."
 	docker run --rm -it $(APP_NAME):latest
+
+docker-push: ## Push Docker image to registry
+	@echo "Pushing Docker image..."
+	docker push $(APP_NAME):latest
+
+docker-clean: ## Clean Docker artifacts
+	@echo "Cleaning Docker artifacts..."
+	docker system prune -f
+	docker volume prune -f
 
 profile-cpu: ## Run CPU profiling
 	@echo "Running CPU profiling..."
@@ -193,6 +266,25 @@ validate: ## Validate training data
 	go run ./cmd/validator --data-path ./data
 
 benchmark: test-bench ## Run performance benchmarks
+
+
+# 1. Build the Bridge using Host CUDA 10.2 (Match your drivers!)
+build-cuda:
+	@echo "Building CUDA Bridge for version $(CUDA_VERSION)..."
+	nvcc -Xcompiler -fPIC -shared -o pkg/simulator/libcuda_bridge.so pkg/simulator/cuda_bridge.cu
+
+# 2. Build the Go Trainer (Links to local libubpf.so)
+build-go:
+	@echo "Building HASHER Data Trainer..."
+	go build -o bin/data-trainer ./cmd/trainer/
+
+# 3. Build the Lean OpenWRT Testbed
+docker-openwrt:
+	@echo "Packaging into OpenWRT Rootfs..."
+	docker build -t hasher-openwrt:latest -f Dockerfile.openwrt .
+
+clean:
+	rm -f bin/data-trainer pkg/simulator/libcuda_bridge.so
 
 # Default target
 .DEFAULT_GOAL := help
