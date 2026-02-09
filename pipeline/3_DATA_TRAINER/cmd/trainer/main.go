@@ -41,6 +41,27 @@ type TrainingOrchestrator struct {
 	trainingData  []*training.TrainingRecord
 }
 
+// ingestionLogger wraps the internal logging.Logger to implement storage.IngestionLogger
+type ingestionLogger struct {
+	logger *logging.Logger
+}
+
+func (il *ingestionLogger) Info(format string, args ...interface{}) {
+	il.logger.Info(format, args...)
+}
+
+func (il *ingestionLogger) Debug(format string, args ...interface{}) {
+	il.logger.Debug(format, args...)
+}
+
+func (il *ingestionLogger) Warn(format string, args ...interface{}) {
+	il.logger.Warn(format, args...)
+}
+
+func (il *ingestionLogger) Error(format string, args ...interface{}) {
+	il.logger.Error(format, args...)
+}
+
 func main() {
 	flag.Parse()
 
@@ -134,36 +155,41 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	}
 	to.checkpointMgr = checkpointMgr
 
-	// Initialize data ingestion
+	// Initialize data ingestion - REQUIRED
 	to.logger.Info("Initializing data ingestion...")
 	trainingDataPath := filepath.Join(os.Getenv("HOME"), ".local", "share", "data-encoder", "training_frames.parquet")
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
-		to.logger.Warn("Training data not found at %s, will use synthetic data", trainingDataPath)
-		trainingDataPath = ""
-	} else {
-		dataIngestor := storage.NewDataIngestor(filepath.Dir(trainingDataPath))
-		to.dataIngestor = dataIngestor
+		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
+	}
 
-		to.logger.Info("Ingesting training data from %s...", trainingDataPath)
-		trainingRecords, err := dataIngestor.ProcessAllFiles(nil)
-		if err != nil {
-			to.logger.Warn("Failed to ingest training data: %v", err)
-			to.logger.Info("Proceeding with synthetic training data")
-		} else {
-			to.trainingData = trainingRecords
-			to.logger.Info("Successfully ingested %d training records", len(trainingRecords))
+	to.logger.Info("Found training data at: %s", trainingDataPath)
+	dataIngestor := storage.NewDataIngestor(filepath.Dir(trainingDataPath))
+	dataIngestor.SetLogger(&ingestionLogger{to.logger})
+	dataIngestor.SetCheckpointManager(to.checkpointMgr)
+	dataIngestor.SetChunkSize(1000) // Process 1000 records at a time
+	to.dataIngestor = dataIngestor
 
-			// Validate training data
-			report, err := dataIngestor.ValidateTrainingData(trainingRecords)
-			if err != nil {
-				to.logger.Warn("Failed to validate training data: %v", err)
-			} else {
-				to.logger.Info("Training data validation: %s", report.GetSummary())
-				if !report.Valid {
-					to.logger.Warn("Training data has issues, proceeding anyway")
-				}
-			}
-		}
+	trainingRecords, err := dataIngestor.ProcessAllFiles(nil)
+	if err != nil {
+		return fmt.Errorf("failed to ingest training data: %w - please check that the parquet file is valid", err)
+	}
+
+	if len(trainingRecords) == 0 {
+		return fmt.Errorf("no training records found in %s - file may be empty or corrupted", trainingDataPath)
+	}
+
+	to.trainingData = trainingRecords
+	to.logger.Info("Successfully ingested %d training records", len(trainingRecords))
+
+	// Validate training data
+	report, err := dataIngestor.ValidateTrainingData(trainingRecords)
+	if err != nil {
+		return fmt.Errorf("failed to validate training data: %w", err)
+	}
+
+	to.logger.Info("Training data validation: %s", report.GetSummary())
+	if !report.Valid {
+		return fmt.Errorf("training data validation failed: %s", report.GetSummary())
 	}
 
 	to.logger.Info("Initializing evolutionary harness...")
@@ -207,15 +233,13 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 func (to *TrainingOrchestrator) Run(ctx context.Context, maxEpochs, populationSize int) error {
 	to.logger.Info("Starting training with %d epochs, population size %d", maxEpochs, populationSize)
 
-	// Use ingested data if available, otherwise create synthetic data
-	if len(to.trainingData) > 0 {
-		to.logger.Info("Training with %d ingested records", len(to.trainingData))
-		return to.runTrainingWithData(ctx, maxEpochs, populationSize, to.trainingData)
-	} else {
-		to.logger.Info("No ingested data available, using synthetic training")
-		tokenMap := to.createTokenMap()
-		return to.runSyntheticTraining(ctx, maxEpochs, populationSize, tokenMap)
+	// Training data is required - no synthetic fallback
+	if len(to.trainingData) == 0 {
+		return fmt.Errorf("no training data available - data ingestion failed during initialization")
 	}
+
+	to.logger.Info("Training with %d ingested records", len(to.trainingData))
+	return to.runTrainingWithData(ctx, maxEpochs, populationSize, to.trainingData)
 }
 
 func (to *TrainingOrchestrator) runSyntheticTraining(ctx context.Context, maxEpochs, populationSize int, tokenMap map[int32]bool) error {

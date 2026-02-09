@@ -2,16 +2,21 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 
 	"data-encoder/pkg/analyzer"
+	"data-encoder/pkg/checkpoint"
 	"data-encoder/pkg/embeddings"
 	"data-encoder/pkg/mapper"
 	"data-encoder/pkg/schema"
@@ -35,6 +40,10 @@ type Config struct {
 	WindowSize   int // Default: 128 tokens
 	WindowStride int // Default: 1 (no overlap)
 	BatchSize    int // Default: 32 contexts per API call
+
+	// NEW: Checkpoint and quota configuration
+	QuotaLimit       int  // Maximum embeddings quota (default: 5000)
+	EnableCheckpoint bool // Enable checkpoint/resume functionality
 }
 
 func main() {
@@ -84,6 +93,10 @@ func parseFlags() *Config {
 	flag.IntVar(&config.WindowSize, "window-size", 128, "Sliding window size in tokens")
 	flag.IntVar(&config.WindowStride, "window-stride", 1, "Stride between sliding windows")
 	flag.IntVar(&config.BatchSize, "batch-size", 32, "Batch size for embedding API calls")
+
+	// NEW: Quota and checkpoint configuration
+	flag.IntVar(&config.QuotaLimit, "quota", 5000, "Maximum embeddings quota per run")
+	flag.BoolVar(&config.EnableCheckpoint, "checkpoint", true, "Enable checkpoint/resume functionality")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Data Encoder - Transform embeddings into hardware-ready Neural Frames\n\n")
@@ -274,8 +287,42 @@ func performVarianceAnalysis(inputFile string) ([]int, error) {
 }
 
 func runEncoder(config *Config) error {
-	log.Printf("🔧 Initializing Data Encoder (seed=%d, workers=%d, window=%d, stride=%d, batch=%d)...",
-		config.MapperSeed, config.NumWorkers, config.WindowSize, config.WindowStride, config.BatchSize)
+	// Create a cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	// Handle signals in a goroutine
+	go func() {
+		sig := <-sigChan
+		log.Printf("\n🛑 Received signal: %v. Initiating graceful shutdown...", sig)
+		cancel()
+	}()
+
+	log.Printf("🔧 Initializing Data Encoder (seed=%d, workers=%d, window=%d, stride=%d, batch=%d, quota=%d)...",
+		config.MapperSeed, config.NumWorkers, config.WindowSize, config.WindowStride, config.BatchSize, config.QuotaLimit)
+
+	// 0. Initialize Checkpoint Manager (for resume capability and quota tracking)
+	var cpManager *checkpoint.Manager
+	if config.EnableCheckpoint {
+		var err error
+		cpManager, err = checkpoint.NewManager(config.OutputFile)
+		if err != nil {
+			log.Printf("⚠️  Failed to initialize checkpoint manager: %v", err)
+			// Continue without checkpointing
+			cpManager = nil
+		} else {
+			// Set quota limit from config
+			cpManager.SetQuotaLimit(config.QuotaLimit)
+			// Check if quota should be reset (new day)
+			cpManager.ResetDailyQuota()
+			log.Printf("✓ Checkpoint manager initialized: %s", cpManager.GetCheckpointPath())
+		}
+	}
 
 	// 1. Initialize Services
 	tk, err := tokenizer.New()
@@ -304,6 +351,17 @@ func runEncoder(config *Config) error {
 	varianceMapper := mapper.NewVarianceMapper(varianceIndices)
 	log.Printf("✓ Variance-aware mapper initialized with %d signal indices", len(varianceIndices))
 
+	// Check initial quota status
+	if cpManager != nil {
+		used, limit, remaining := cpManager.GetQuotaStatus()
+		log.Printf("📊 Quota status: %d/%d used, %d remaining", used, limit, remaining)
+
+		if remaining <= 0 {
+			log.Printf("⚠️  Quota already exhausted (%d/%d). Nothing to process.", used, limit)
+			return nil
+		}
+	}
+
 	log.Printf("💾 Output will be saved to: %s", config.OutputFile)
 
 	// 2. Setup Parquet Writer
@@ -311,53 +369,132 @@ func runEncoder(config *Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer fw.Close()
 
 	pw, err := writer.NewParquetWriter(fw, new(schema.TrainingFrame), int64(config.NumWorkers))
 	if err != nil {
+		fw.Close()
 		return fmt.Errorf("failed to create Parquet writer: %w", err)
 	}
 	pw.CompressionType = parquet.CompressionCodec_SNAPPY
-	defer pw.WriteStop()
 
-	// 3. Detect file type and read appropriate format
-	fileType := detectFileType(config.InputFile)
-	log.Printf("📖 Detected input file type: %s", fileType)
-
+	// Use WaitGroup to coordinate processing and cleanup
+	var wg sync.WaitGroup
 	var frameCount int64
+	var processErr error
+	var mu sync.Mutex
 
-	if fileType == "parquet" {
-		// Try to read as parquet first
-		var records []schema.DocumentRecord
-		records, err = readParquetFile(config.InputFile)
-		if err != nil {
-			// Parquet read failed, try fallback to JSON
-			log.Printf("⚠️  Parquet read failed (%v), attempting JSON fallback...", err)
-			frameCount, err = processJSONFallback(config.InputFile, mp, varianceMapper, tk, ew, pw, config)
+	// Start processing in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// 3. Detect file type and read appropriate format
+		fileType := detectFileType(config.InputFile)
+		log.Printf("📖 Detected input file type: %s", fileType)
+
+		if fileType == "parquet" {
+			// Try to read as parquet first
+			var records []schema.DocumentRecord
+			records, err = readParquetFile(config.InputFile)
 			if err != nil {
-				return fmt.Errorf("both parquet and JSON processing failed: %w", err)
+				// Parquet read failed, try fallback to JSON
+				log.Printf("⚠️  Parquet read failed (%v), attempting JSON fallback...", err)
+				frameCount, err = processJSONFallback(config.InputFile, mp, varianceMapper, tk, ew, pw, config, cpManager)
+				if err != nil {
+					mu.Lock()
+					processErr = fmt.Errorf("both parquet and JSON processing failed: %w", err)
+					mu.Unlock()
+					return
+				}
+			} else {
+				// Successfully read parquet, convert to MinedRecord format and process
+				frameCount, err = processDocumentRecords(records, mp, varianceMapper, tk, ew, pw, config, cpManager)
+				if err != nil {
+					mu.Lock()
+					processErr = fmt.Errorf("failed to process parquet records: %w", err)
+					mu.Unlock()
+					return
+				}
 			}
 		} else {
-			// Successfully read parquet, convert to MinedRecord format and process
-			frameCount, err = processDocumentRecords(records, mp, varianceMapper, tk, ew, pw, config)
+			// Process as JSON format (array or JSONL)
+			frameCount, err = processJSONFile(config.InputFile, mp, varianceMapper, tk, ew, pw, config, cpManager)
 			if err != nil {
-				return fmt.Errorf("failed to process parquet records: %w", err)
+				mu.Lock()
+				processErr = fmt.Errorf("failed to process JSON file: %w", err)
+				mu.Unlock()
+				return
 			}
 		}
-	} else {
-		// Process as JSON format (array or JSONL)
-		frameCount, err = processJSONFile(config.InputFile, mp, varianceMapper, tk, ew, pw, config)
-		if err != nil {
-			return fmt.Errorf("failed to process JSON file: %w", err)
+	}()
+
+	// Wait for either processing to complete or context to be cancelled
+	waitChan := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitChan)
+	}()
+
+	select {
+	case <-waitChan:
+		// Processing completed normally
+	case <-ctx.Done():
+		// Signal received, wait for goroutine to finish
+		log.Printf("⏳ Waiting for processing to stop...")
+		<-waitChan
+	}
+
+	// Save final checkpoint before cleanup
+	if cpManager != nil {
+		if err := cpManager.Save(); err != nil {
+			log.Printf("⚠️  Failed to save final checkpoint: %v", err)
+		}
+
+		// Check if quota was exhausted
+		if !cpManager.HasQuotaAvailable() {
+			log.Printf("🛑 Processing stopped: quota exhausted")
+		} else if ctx.Err() != nil {
+			log.Printf("🛑 Processing stopped: interrupted by user")
+		} else {
+			log.Printf("✅ Processing completed - checkpoint saved for resume")
 		}
 	}
+
+	// Explicitly flush and close the parquet writer
+	log.Printf("💾 Flushing parquet writer...")
+	if err := pw.WriteStop(); err != nil {
+		fw.Close()
+		return fmt.Errorf("failed to flush parquet writer: %w", err)
+	}
+	log.Printf("💾 Parquet writer flushed successfully")
+
+	// Close the file writer
+	if err := fw.Close(); err != nil {
+		return fmt.Errorf("failed to close file writer: %w", err)
+	}
+	log.Printf("💾 File writer closed")
+
+	// Check for processing errors
+	mu.Lock()
+	err = processErr
+	mu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	// Verify the output file exists and has content
+	fileInfo, err := os.Stat(config.OutputFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat output file: %w", err)
+	}
+	log.Printf("✅ Output file created: %s (%d bytes)", config.OutputFile, fileInfo.Size())
 
 	log.Printf("📈 Total: %d training frames generated", frameCount)
 	return nil
 }
 
 // processJSONFallback handles JSON processing when parquet fails
-func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) (int64, error) {
+func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	log.Printf("🔄 Attempting JSON processing from: %s", filePath)
 
 	content, err := os.ReadFile(filePath)
@@ -385,15 +522,15 @@ func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.Varianc
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, pw, config)
+		return processMinedRecords(&records, mp, vm, tk, ew, pw, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config)
+		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config, cpManager)
 	}
 }
 
 // processJSONFile processes JSON files with proper error handling
-func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) (int64, error) {
+func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read input file: %w", err)
@@ -419,19 +556,32 @@ func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMap
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, pw, config)
+		return processMinedRecords(&records, mp, vm, tk, ew, pw, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config)
+		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config, cpManager)
 	}
 }
 
 // processDocumentRecords processes DocumentRecord chunks from parquet file
-func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) (int64, error) {
+func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
+	var recordCount int64
+	log.Printf("[BATCH] Starting to process %d DocumentRecords...", len(records))
 
 	for i := range records {
 		record := &records[i]
+
+		// Check if we should skip this record (already processed)
+		if cpManager != nil && cpManager.ShouldSkipRecord(record.FileName, record.ChunkID, 0) {
+			log.Printf("[BATCH] Skipping already processed record %d/%d: %s (chunk %d)",
+				i+1, len(records), record.FileName, record.ChunkID)
+			recordCount++
+			continue
+		}
+
+		log.Printf("[BATCH] Processing record %d/%d: %s (chunk %d, content: %d chars)",
+			i+1, len(records), record.FileName, record.ChunkID, len(record.Content))
 
 		// Convert DocumentRecord to MinedRecord format for processing
 		minedRecord := schema.MinedRecord{
@@ -440,31 +590,68 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 			Content:  record.Content,
 		}
 
-		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, mp, vm, tk, ew, pw, config); err != nil {
-			log.Printf("⚠️  Error processing DocumentRecord %d: %v", i, err)
-			continue
+		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+			return 0, fmt.Errorf("failed to process DocumentRecord %d: %w", i, err)
 		}
 
-		// Progress logging every 100 records
-		if i%100 == 0 {
-			log.Printf("📊 Processed %d DocumentRecords, generated %d frames...", i, frameCount)
+		recordCount++
+		log.Printf("[BATCH] Completed record %d/%d, total frames: %d", i+1, len(records), frameCount)
+
+		// Update checkpoint every 10 records
+		if cpManager != nil && i%10 == 0 {
+			cpManager.UpdateProgress(record.FileName, record.ChunkID, 0)
+			cpManager.IncrementStats(1, frameCount-cpManager.GetCheckpoint().FramesGenerated)
+			if err := cpManager.Save(); err != nil {
+				log.Printf("⚠️  Failed to save checkpoint: %v", err)
+			}
+		}
+
+		// Flush parquet writer every 50 frames to ensure data is written to disk
+		if frameCount%50 == 0 {
+			log.Printf("[BATCH] Flushing parquet writer (frame count: %d)...", frameCount)
+			if err := pw.Flush(true); err != nil {
+				log.Printf("⚠️  Failed to flush parquet writer: %v", err)
+			}
+		}
+
+		// Progress logging every 10 records (more frequent)
+		if i%10 == 0 {
+			log.Printf("📊 Processed %d/%d DocumentRecords, generated %d frames...", i, len(records), frameCount)
 		}
 	}
 
-	log.Printf("📈 Total: %d DocumentRecords processed, %d training frames generated", len(records), frameCount)
+	log.Printf("📈 Total: %d DocumentRecords processed, %d training frames generated", recordCount, frameCount)
 	return frameCount, nil
 }
 
 // processMinedRecords processes MinedRecord chunks from JSON array
-func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) (int64, error) {
+func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
+	var processedCount int64
 
 	for i := range *records {
 		record := &(*records)[i]
 
-		if err := processSingleRecordWithSlidingWindow(record, &frameCount, mp, vm, tk, ew, pw, config); err != nil {
-			log.Printf("⚠️  Error processing record %d: %v", i, err)
+		// Check if we should skip this record
+		if cpManager != nil && cpManager.ShouldSkipRecord(record.FileName, int32(record.ChunkID), 0) {
+			log.Printf("[BATCH] Skipping already processed record %d/%d: %s", i+1, len(*records), record.FileName)
+			processedCount++
 			continue
+		}
+
+		if err := processSingleRecordWithSlidingWindow(record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+			return 0, fmt.Errorf("failed to process record %d: %w", i, err)
+		}
+
+		processedCount++
+
+		// Update checkpoint every 10 records
+		if cpManager != nil && i%10 == 0 {
+			cpManager.UpdateProgress(record.FileName, int32(record.ChunkID), 0)
+			cpManager.IncrementStats(1, frameCount-cpManager.GetCheckpoint().FramesGenerated)
+			if err := cpManager.Save(); err != nil {
+				log.Printf("⚠️  Failed to save checkpoint: %v", err)
+			}
 		}
 
 		// Progress logging every 100 records
@@ -473,12 +660,12 @@ func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *
 		}
 	}
 
-	log.Printf("📈 Total: %d records processed, %d training frames generated", len(*records), frameCount)
+	log.Printf("📈 Total: %d records processed, %d training frames generated", processedCount, frameCount)
 	return frameCount, nil
 }
 
 // processJSONLRecords processes JSONL format records
-func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) (int64, error) {
+func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var recordCount, frameCount, fixedCount int64
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var updatedLines []string
@@ -515,10 +702,24 @@ func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.Variance
 
 		recordCount++
 
-		// Process the record with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config); err != nil {
-			log.Printf("⚠️  Error processing record %d: %v", recordCount, err)
+		// Check if we should skip this record
+		if cpManager != nil && cpManager.ShouldSkipRecord(record.FileName, int32(record.ChunkID), 0) {
+			log.Printf("[BATCH] Skipping already processed record %d: %s", recordCount, record.FileName)
 			continue
+		}
+
+		// Process the record with sliding windows
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+			return 0, fmt.Errorf("failed to process record %d: %w", recordCount, err)
+		}
+
+		// Update checkpoint every 10 records
+		if cpManager != nil && recordCount%10 == 0 {
+			cpManager.UpdateProgress(record.FileName, int32(record.ChunkID), 0)
+			cpManager.IncrementStats(1, frameCount-cpManager.GetCheckpoint().FramesGenerated)
+			if err := cpManager.Save(); err != nil {
+				log.Printf("⚠️  Failed to save checkpoint: %v", err)
+			}
 		}
 
 		// Progress logging every 100 records
@@ -559,17 +760,31 @@ func fixJSONContent(content string) (string, bool) {
 	return fixed, original != fixed
 }
 
-func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) error {
+func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) error {
+	log.Printf("[PROCESS] Starting record %d from %s (content length: %d chars)", record.ChunkID, record.FileName, len(record.Content))
+
+	// Check quota availability before processing
+	if cpManager != nil && !cpManager.HasQuotaAvailable() {
+		log.Printf("🛑 Quota exhausted (%d/%d embeddings used). Stopping processing.",
+			cpManager.GetCheckpoint().QuotaUsed, cpManager.GetCheckpoint().QuotaLimit)
+		return fmt.Errorf("quota exhausted")
+	}
+
 	// 1. Tokenize the entire content once
+	log.Printf("[PROCESS] Step 1/6: Tokenizing content...")
 	allTokens := tk.Encode(record.Content)
+	log.Printf("[PROCESS] Tokenized to %d tokens", len(allTokens))
+
 	if len(allTokens) < 2 {
 		log.Printf("⚠️  Insufficient tokens (%d) for sliding window in record %d from %s", len(allTokens), record.ChunkID, record.FileName)
 		return nil
 	}
 
 	// 2. Generate sliding windows
+	log.Printf("[PROCESS] Step 2/6: Generating sliding windows (size=%d, stride=%d)...", config.WindowSize, config.WindowStride)
 	sg := sliding.NewGenerator(config.WindowSize, config.WindowStride)
 	windows := sg.GenerateWindows(allTokens)
+	log.Printf("[PROCESS] Generated %d sliding windows", len(windows))
 
 	if len(windows) == 0 {
 		log.Printf("⚠️  No windows generated for record %d from %s", record.ChunkID, record.FileName)
@@ -577,26 +792,48 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 	}
 
 	// 3. Process windows in batches for API efficiency
+	log.Printf("[PROCESS] Step 3/6: Processing %d windows in batches of %d...", len(windows), config.BatchSize)
 	for batchStart := 0; batchStart < len(windows); batchStart += config.BatchSize {
 		batchEnd := batchStart + config.BatchSize
 		if batchEnd > len(windows) {
 			batchEnd = len(windows)
 		}
 		batch := windows[batchStart:batchEnd]
+		batchSize := len(batch)
+		log.Printf("[PROCESS]   Processing batch %d-%d of %d windows...", batchStart, batchEnd, len(windows))
+
+		// Check quota before this batch
+		if cpManager != nil {
+			if !cpManager.UseQuota(batchSize) {
+				used, limit, _ := cpManager.GetQuotaStatus()
+				log.Printf("🛑 Quota exhausted before batch (need %d, have %d/%d). Stopping.",
+					batchSize, used, limit)
+				return fmt.Errorf("quota exhausted")
+			}
+			used, limit, remaining := cpManager.GetQuotaStatus()
+			log.Printf("📊 Quota: %d/%d used, %d remaining (using %d for this batch)",
+				used, limit, remaining, batchSize)
+		}
 
 		// 4. Extract context texts for batch embedding
+		log.Printf("[PROCESS] Step 4/6: Extracting %d context texts...", len(batch))
 		contextTexts := make([]string, len(batch))
 		for i, window := range batch {
 			contextTexts[i] = tk.Decode(window.ContextTokens)
 		}
+		log.Printf("[PROCESS]   Extracted %d context texts (avg length: %d chars)", len(contextTexts), len(contextTexts[0]))
 
 		// 5. Get batch embeddings from Cloudflare
+		log.Printf("[PROCESS] Step 5/6: Requesting embeddings from endpoint...")
 		batchEmbeddings, err := ew.GetBatchEmbeddings(contextTexts)
 		if err != nil {
+			log.Printf("[PROCESS] ❌ Embedding request FAILED: %v", err)
 			return fmt.Errorf("batch embedding failed for record %d: %w", record.ChunkID, err)
 		}
+		log.Printf("[PROCESS]   Received %d embeddings (dimension: %d)", len(batchEmbeddings), len(batchEmbeddings[0]))
 
 		// 6. Process each window in the batch
+		log.Printf("[PROCESS] Step 6/6: Writing %d frames to parquet...", len(batch))
 		for i, window := range batch {
 			// Map embedding to ASIC slots
 			asicSlots := mp.MapToSlots(batchEmbeddings[i])
@@ -614,11 +851,12 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 			frame.SetAsicSlots(asicSlots)
 
 			if err := pw.Write(frame); err != nil {
-				log.Printf("⚠️  Parquet write error: %v", err)
-			} else {
-				*frameCount++
+				log.Printf("[PROCESS] ❌ Parquet write error: %v", err)
+				return fmt.Errorf("failed to write frame to parquet: %w", err)
 			}
+			*frameCount++
 		}
+		log.Printf("[PROCESS]   Wrote %d frames (total: %d)", len(batch), *frameCount)
 
 		// Progress logging for large batches
 		if len(windows) > config.BatchSize && batchStart%(config.BatchSize*2) == 0 {
@@ -627,10 +865,11 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 		}
 	}
 
+	log.Printf("[PROCESS] ✅ Completed record %d: %d windows -> %d frames", record.ChunkID, len(windows), *frameCount)
 	return nil
 }
 
-func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config) error {
+func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) error {
 	decoder := json.NewDecoder(jsonFile)
 	decoder.DisallowUnknownFields()
 
@@ -654,9 +893,8 @@ func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.Vari
 		recordCount++
 
 		// Process with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config); err != nil {
-			log.Printf("⚠️  Error processing record %d: %v", recordCount, err)
-			continue
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+			return fmt.Errorf("failed to process record %d: %w", recordCount, err)
 		}
 
 		// Progress logging every 100 records

@@ -28,19 +28,22 @@ struct bge_header {
  * The Entry Point for the uBPF VM.
  * The 'ctx' is a pointer to the 80-byte Bitcoin-camouflaged header.
  */
-uint64_t hunt_seed(void *ctx, uint64_t target_token_id) {
-    if (!ctx) return 0;
-
-    // Cast the context to our Bitcoin Header structure
-    struct bge_header *header = (struct bge_header *)ctx;
-
-    // Call the external CUDA/ASIC helper (ID 1)
-    // Register-to-function mapping is handled by the uBPF library
-    cuda_call_t call_hw = (cuda_call_t)CALL_CUDA;
+// neural_kernel.c (Updated for Jitter)
+uint64_t hunt_seed(void *ctx, uint64_t target) {
+    struct bge_header *h = (struct bge_header *)ctx;
     
-    // The ASIC will now spin millions of nonces (seeds)
-    uint32_t found_nonce = call_hw(header, (uint32_t)target_token_id);
-
-    // Return the found seed (nonce) to the Go Orchestrator
-    return (uint64_t)found_nonce;
+    for (int i = 0; i < 21; i++) {
+        // 1. Call ASIC/CUDA to hash the current state
+        uint32_t current_hash = call_hw(h);
+        
+        // 2. Influence Jitter: Lookup the 'jitter' from the DB based on the hash
+        // ID 2 is our 'flash_search' helper registered in Go
+        uint32_t jitter = bpf_helper_call(2, current_hash);
+        
+        // 3. Inject Jitter into the Merkle Root (Slots 8-11)
+        h->merkle_root[0] ^= jitter;
+    }
+    
+    // After 21 passes, check if we hit the target
+    return (uint64_t)h->nonce;
 }

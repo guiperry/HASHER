@@ -765,3 +765,4 @@ func ComputeContextHash(tokenSequence []int32, windowSize int) uint32 {
 
 	return uint32(hash[0]) | uint32(hash[1])<<8 | uint32(hash[2])<<16 | uint32(hash[3])<<24
 }
+

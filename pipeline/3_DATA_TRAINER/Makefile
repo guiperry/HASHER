@@ -113,10 +113,6 @@ install: build ## Install the application
 toolchain:
 	bash setup_toolchain.sh
 	
-# Compile the CUDA Bridge using YOUR local nvcc
-
-build: build-cuda
-	go build -o bin/data-trainer ./cmd/trainer/
 
 
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"time"
 )
@@ -50,7 +49,7 @@ type CloudflareWorkersResponse struct {
 func New() *Service {
 	config.LoadEnv()
 	endpoint := config.GetCloudflareEndpoint()
-	return &Service{
+	svc := &Service{
 		baseURL:     endpoint,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		batchSize:   DefaultBatchSize,
@@ -58,13 +57,23 @@ func New() *Service {
 		ollamaHost:  "http://localhost:11434/api/embeddings",
 		ollamaModel: "nomic-embed-text",
 	}
+
+	// Validate endpoint at initialization
+	if endpoint != "" {
+		if err := svc.ValidateEndpoint(); err != nil {
+			log.Fatalf("❌ Embeddings endpoint validation failed: %v", err)
+		}
+		log.Printf("✅ Embeddings endpoint validated: %s", endpoint)
+	}
+
+	return svc
 }
 
 // NewWithBatchSize creates a new embeddings service with custom batch size
 func NewWithBatchSize(batchSize int) *Service {
 	config.LoadEnv()
 	endpoint := config.GetCloudflareEndpoint()
-	return &Service{
+	svc := &Service{
 		baseURL:     endpoint,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		batchSize:   batchSize,
@@ -72,6 +81,16 @@ func NewWithBatchSize(batchSize int) *Service {
 		ollamaHost:  "http://localhost:11434/api/embeddings",
 		ollamaModel: "nomic-embed-text",
 	}
+
+	// Validate endpoint at initialization
+	if endpoint != "" {
+		if err := svc.ValidateEndpoint(); err != nil {
+			log.Fatalf("❌ Embeddings endpoint validation failed: %v", err)
+		}
+		log.Printf("✅ Embeddings endpoint validated: %s", endpoint)
+	}
+
+	return svc
 }
 
 // GetEmbedding returns embedding for a single text
@@ -137,10 +156,8 @@ func (s *Service) getBatchChunk(texts []string) ([][]float32, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Build the full URL for the model (public endpoint)
-	fullURL := fmt.Sprintf("%s/%s", s.baseURL, s.model)
-
-	httpReq, err := http.NewRequest("POST", fullURL, bytes.NewBuffer(jsonBody))
+	// Use baseURL directly - model is specified in request body
+	httpReq, err := http.NewRequest("POST", s.baseURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -181,41 +198,51 @@ func (s *Service) getBatchChunk(texts []string) ([][]float32, error) {
 	return embeddings, nil
 }
 
-// getBatchChunkWithRetry adds retry logic with exponential backoff
+// getBatchChunkWithRetry processes a batch without retries - fails immediately on error
 func (s *Service) getBatchChunkWithRetry(texts []string, maxRetries int) ([][]float32, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		embeddings, err := s.getBatchChunk(texts)
-		if err == nil {
-			return embeddings, nil
-		}
-
-		lastErr = err
-
-		// Check if we should retry based on HTTP status code
-		// We need to extract the status code from the error message or use a different approach
-		errStr := err.Error()
-		if len(errStr) > 0 {
-			// If it's a status error we shouldn't retry, break
-			// This is a workaround since we can't easily get the status code from the error
-			// The API returns specific error messages for client errors
-		}
-
-		// Exponential backoff
-		if attempt < maxRetries-1 {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			log.Printf("⚠️  Embedding attempt %d failed, retrying in %v: %v", attempt+1, backoff, err)
-			time.Sleep(backoff)
-		}
+	embeddings, err := s.getBatchChunk(texts)
+	if err != nil {
+		return nil, fmt.Errorf("embedding request failed: %w", err)
 	}
-
-	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+	return embeddings, nil
 }
 
 // GetBatchSize returns the configured batch size
 func (s *Service) GetBatchSize() int {
 	return s.batchSize
+}
+
+// ValidateEndpoint checks if the embeddings endpoint is accessible
+func (s *Service) ValidateEndpoint() error {
+	testReq := CloudflareWorkersRequest{
+		Texts: []string{"test"},
+	}
+
+	jsonBody, err := json.Marshal(testReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal test request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", s.baseURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create test request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Use a shorter timeout for validation
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("endpoint unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // SetTimeout sets the HTTP client timeout

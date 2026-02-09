@@ -335,7 +335,6 @@ func getBatchEmbeddings(provider *embedder.HybridEmbeddingProvider, texts []stri
 	return provider.GetBatchEmbeddings(texts)
 }
 
-
 // writeOutput writes the document records to both Parquet (primary) and JSON (backup) files
 func writeOutput(parquetPath string, jsonPath string, results <-chan DocumentRecord) error {
 	// Write to Parquet first (primary format)
@@ -484,9 +483,14 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 	fmt.Printf("🔄 Starting Continuous Workflow\n")
 	fmt.Printf("================================\n")
 
-	// Check or start Ollama before running workflow
-	if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
-		return fmt.Errorf("failed to start Ollama: %w", err)
+	// Only start Ollama if Cloudflare is not configured
+	if config.CloudflareEndpoint == "" {
+		fmt.Println("⚠️  No Cloudflare endpoint configured, checking Ollama...")
+		if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
+			return fmt.Errorf("failed to start Ollama: %w", err)
+		}
+	} else {
+		fmt.Printf("☁️  Using Cloudflare embeddings: %s\n", config.CloudflareEndpoint)
 	}
 
 	// Initialize session stats (cloudflare tracking only)
