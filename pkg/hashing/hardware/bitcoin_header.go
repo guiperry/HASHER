@@ -1,4 +1,4 @@
-package simulator
+package hardware
 
 import (
 	"encoding/binary"

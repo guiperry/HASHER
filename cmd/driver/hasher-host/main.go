@@ -30,9 +30,12 @@ import (
 
 	"hasher/internal/config"
 	"hasher/internal/hasher"
-	"hasher/internal/hasher/tokenizer"
-	"hasher/internal/hasher/transformer"
 	"hasher/internal/host"
+	"hasher/pkg/hashing/inference"
+	"hasher/pkg/hashing/methods/asic"
+	"hasher/pkg/hashing/neural"
+	"hasher/pkg/hashing/tokenizer"
+	"hasher/pkg/hashing/transformer"
 )
 
 const (
@@ -116,10 +119,10 @@ var (
 // Orchestrator manages the recursive inference process
 type Orchestrator struct {
 	asicClient      *hasher.ASICClient
-	engine          *hasher.RecursiveEngine
-	network         *hasher.HashNetwork
+	engine          *inference.RecursiveEngine
+	network         *neural.HashNetwork
 	cryptoModel     *transformer.HasherTransformer
-	miningNeuron    *hasher.MiningNeuron // New field for Nonce generation
+	miningNeuron    *neural.MiningNeuron // New field for Nonce generation
 	discoveryResult *hasher.DiscoveryResult
 	startTime       time.Time
 	mu              sync.RWMutex
@@ -434,14 +437,29 @@ func main() {
 	}
 
 	// Create hash network
-	network, err := hasher.NewHashNetwork(*inputSize, *hidden1, *hidden2, *outputSize)
+	network, err := neural.NewHashNetwork(*inputSize, *hidden1, *hidden2, *outputSize)
 	if err != nil {
 		log.Fatalf("Failed to create hash network: %v", err)
 	}
 	log.Printf("Hash network created: [%d, %d, %d, %d]", *inputSize, *hidden1, *hidden2, *outputSize)
 
+	// Create ASICMethod wrapper for HashMethod interface
+	var hashMethod *asic.ASICMethod
+	if asicClient != nil && !asicClient.IsUsingFallback() {
+		// Create ASICMethod from the server device address
+		address := serverDeviceAddr
+		if address == "" {
+			address = "localhost:8888"
+		}
+		hashMethod = asic.NewASICMethod(address)
+		if err := hashMethod.Initialize(); err != nil {
+			log.Printf("Warning: Failed to initialize ASICMethod: %v", err)
+			hashMethod = nil
+		}
+	}
+
 	// Create recursive engine with ASIC support
-	engine, err := hasher.NewRecursiveEngineWithASIC(network, asicClient, *passes, *jitter, *seedRotation)
+	engine, err := inference.NewRecursiveEngineWithHashMethod(network, hashMethod, *passes, *jitter, *seedRotation)
 	if err != nil {
 		log.Fatalf("Failed to create recursive engine: %v", err)
 	}
@@ -449,7 +467,7 @@ func main() {
 
 	// Create crypto-transformer if enabled
 	var cryptoModel *transformer.HasherTransformer
-	var miningNeuron *hasher.MiningNeuron
+	var miningNeuron *neural.MiningNeuron
 	if *enableCrypto {
 		log.Printf("Initializing crypto-transformer...")
 		transformerConfig := &transformer.TransformerConfig{
@@ -462,7 +480,7 @@ func main() {
 			FFNHiddenDim: *ffnHiddenDim,
 			Activation:   *cryptoActivation,
 		}
-		cryptoModel = transformer.NewHasherTransformer(transformerConfig, nil, nil)
+		cryptoModel = transformer.NewHasherTransformer(transformerConfig, hashMethod)
 		log.Printf("Crypto-transformer created: vocab=%d, embed=%d, layers=%d, heads=%d",
 			*vocabSize, *embedDim, *numLayers, *numHeads)
 
@@ -473,16 +491,16 @@ func main() {
 			nonceEnd = 1 // Single nonce for software fallback (instant)
 		}
 
-		miningNeuronConfig := hasher.MiningNeuronConfig{
+		miningNeuronConfig := neural.MiningNeuronConfig{
 			InputDim:   *vocabSize, // Input to MiningNeuron is the tokenScores (logits)
 			OutputDim:  8,          // Generate 8 projections for the mining header
 			Salt:       0xDEADBEEF, // Fixed salt for now
 			NonceStart: 0,
 			NonceEnd:   nonceEnd, // Dynamic search range based on hardware mode
 		}
-		miningNeuron = hasher.NewMiningNeuron(miningNeuronConfig)
-		if asicClient != nil {
-			miningNeuron.SetASICClient(asicClient)
+		miningNeuron = neural.NewMiningNeuron(miningNeuronConfig)
+		if hashMethod != nil {
+			miningNeuron.SetHashMethod(hashMethod)
 		}
 		log.Printf("MiningNeuron created with InputDim=%d, OutputDim=%d", miningNeuronConfig.InputDim, miningNeuronConfig.OutputDim)
 	}
@@ -1016,7 +1034,7 @@ func (o *Orchestrator) handleInfer(c *gin.Context) {
 		Passes:            result.TotalPasses,
 		ValidPasses:       result.ValidPasses,
 		LatencyMs:         float64(latency.Milliseconds()),
-		UsingASIC:         o.engine.IsUsingASIC(),
+		UsingASIC:         o.engine.IsUsingHardware(),
 	})
 }
 
@@ -1061,7 +1079,7 @@ func (o *Orchestrator) handleBatchInfer(c *gin.Context) {
 			results[i] = InferResponse{
 				Prediction: -1,
 				LatencyMs:  float64(inferLatency.Milliseconds()),
-				UsingASIC:  o.engine.IsUsingASIC(),
+				UsingASIC:  o.engine.IsUsingHardware(),
 			}
 			continue
 		}
@@ -1073,14 +1091,14 @@ func (o *Orchestrator) handleBatchInfer(c *gin.Context) {
 			Passes:            result.TotalPasses,
 			ValidPasses:       result.ValidPasses,
 			LatencyMs:         float64(inferLatency.Milliseconds()),
-			UsingASIC:         o.engine.IsUsingASIC(),
+			UsingASIC:         o.engine.IsUsingHardware(),
 		}
 	}
 
 	c.JSON(http.StatusOK, BatchInferResponse{
 		Results:   results,
 		TotalMs:   float64(time.Since(start).Milliseconds()),
-		UsingASIC: o.engine.IsUsingASIC(),
+		UsingASIC: o.engine.IsUsingHardware(),
 	})
 }
 
@@ -1108,7 +1126,7 @@ func (o *Orchestrator) handleHealth(c *gin.Context) {
 
 	c.JSON(http.StatusOK, HealthResponse{
 		Status:            status,
-		UsingASIC:         o.engine.IsUsingASIC(),
+		UsingASIC:         o.engine.IsUsingHardware(),
 		ChipCount:         chipCount,
 		Uptime:            time.Since(o.startTime).String(),
 		ConnectionHealthy: connectionHealthy,
@@ -1140,7 +1158,7 @@ func (o *Orchestrator) handleMetrics(c *gin.Context) {
 		SuccessfulInfers: successfulInfers,
 		FailedInfers:     failedInfers,
 		AverageLatencyMs: avgLatencyMs,
-		UsingASIC:        o.engine.IsUsingASIC(),
+		UsingASIC:        o.engine.IsUsingHardware(),
 		ChipCount:        chipCount,
 		Uptime:           time.Since(o.startTime).String(),
 	})
@@ -1461,14 +1479,9 @@ func (o *Orchestrator) handleTrain(c *gin.Context) {
 		}
 		total++
 
-		// Backward pass with gradients
-		if len(output) > 0 {
-			grad := make([]float32, len(output))
-			if len(sample.OutputTokens) > 0 {
-				grad[0] = 2 * (output[0] - float32(sample.OutputTokens[0]))
-			}
-			o.cryptoModel.Backward(grad, trainConfig.LearningRate)
-		}
+		// Note: Backward pass removed - new simplified transformer uses seed-based weights
+		// which don't support gradient-based backpropagation. Training is done via
+		// seed regeneration or alternative optimization methods.
 	}
 
 	// Calculate metrics
@@ -1489,7 +1502,7 @@ func (o *Orchestrator) handleTrain(c *gin.Context) {
 		Loss:      loss,
 		Accuracy:  accuracy,
 		LatencyMs: float64(latency.Milliseconds()),
-		UsingASIC: o.engine.IsUsingASIC(),
+		UsingASIC: o.engine.IsUsingHardware(),
 	})
 }
 
@@ -1511,7 +1524,7 @@ func (o *Orchestrator) handleCryptoStatus(c *gin.Context) {
 		"num_heads":      o.cryptoModel.Config.NumHeads,
 		"ffn_hidden_dim": o.cryptoModel.Config.FFNHiddenDim,
 		"activation":     o.cryptoModel.Config.Activation,
-		"using_asic":     o.engine.IsUsingASIC(),
+		"using_asic":     o.engine.IsUsingHardware(),
 	})
 }
 
@@ -1821,7 +1834,7 @@ func showInfo(orch *Orchestrator) {
 
 	// Also show orchestrator info
 	fmt.Println("\n=== Orchestrator Info ===")
-	fmt.Printf("Using ASIC:       %v\n", orch.engine.IsUsingASIC())
+	fmt.Printf("Using ASIC:       %v\n", orch.engine.IsUsingHardware())
 	fmt.Printf("Network:          [%d, %d, %d, %d]\n", *inputSize, *hidden1, *hidden2, *outputSize)
 	fmt.Printf("Passes:           %d\n", *passes)
 	fmt.Printf("Jitter:           %.3f\n", *jitter)
