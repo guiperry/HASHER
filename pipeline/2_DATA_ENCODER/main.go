@@ -69,7 +69,7 @@ func getAppDataDir() string {
 	if err != nil {
 		return "."
 	}
-	return filepath.Join(homeDir, ".local", "share", "data-encoder")
+	return filepath.Join(homeDir, ".local", "share", "hasher", "data")
 }
 
 func parseFlags() *Config {
@@ -80,8 +80,8 @@ func parseFlags() *Config {
 	if err != nil {
 		log.Fatalf("Failed to get home directory: %v", err)
 	}
-	defaultParquetInput := filepath.Join(homeDir, ".local", "share", "dataminer", "ai_knowledge_base.parquet")
-	defaultJSONInput := filepath.Join(homeDir, ".local", "share", "dataminer", "backup", "json", "ai_knowledge_base.json")
+	defaultParquetInput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.parquet")
+	defaultJSONInput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
 	defaultOutput := filepath.Join(getAppDataDir(), "training_frames.parquet")
 
 	flag.StringVar(&config.InputFile, "input", defaultParquetInput, "Input Parquet/JSON file path")
@@ -116,7 +116,7 @@ func parseFlags() *Config {
 func validateConfig(config *Config) error {
 	// Calculate default JSON backup path
 	homeDir, _ := os.UserHomeDir()
-	defaultJSONPath := filepath.Join(homeDir, ".local", "share", "dataminer", "backup", "json", "ai_knowledge_base.json")
+	defaultJSONPath := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
 
 	// Detect input file with priority: parquet -> json backup -> legacy json
 	detectedInput, inputType, err := detectInputFile(config.InputFile, defaultJSONPath)
@@ -165,7 +165,8 @@ func detectInputFile(defaultParquetPath, defaultJSONPath string) (string, string
 	}
 
 	// Priority 3: Check for legacy JSON location
-	legacyJSONPath := filepath.Join(filepath.Dir(defaultJSONPath), "..", "json", "ai_knowledge_base.json")
+	homeDir, _ := os.UserHomeDir()
+	legacyJSONPath := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
 	if _, err := os.Stat(legacyJSONPath); err == nil {
 		return legacyJSONPath, "json (legacy)", nil
 	}

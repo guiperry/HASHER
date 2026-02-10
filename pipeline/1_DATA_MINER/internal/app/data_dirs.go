@@ -21,7 +21,7 @@ func GetAppDataDir() (string, error) {
 				basePath = filepath.Join(userProfile, "AppData", "Roaming")
 			} else {
 				// Ultimate fallback
-				basePath = filepath.Join(os.TempDir(), "dataminer")
+				basePath = filepath.Join(os.TempDir(), "hasher", "data")
 			}
 		}
 	case "darwin":
@@ -44,7 +44,7 @@ func GetAppDataDir() (string, error) {
 		}
 	}
 
-	appDir := filepath.Join(basePath, "dataminer")
+	appDir := filepath.Join(basePath, "hasher", "data")
 
 	// Ensure the directory exists
 	if err := os.MkdirAll(appDir, 0755); err != nil {
@@ -59,14 +59,15 @@ func SetupDataDirectories(appDataDir string) (map[string]string, error) {
 	dirs := map[string]string{
 		"checkpoints": filepath.Join(appDataDir, "checkpoints"),
 		"papers":      filepath.Join(appDataDir, "papers"),
-		"json":        filepath.Join(appDataDir, "backup", "json"),
+		"json":        filepath.Join(appDataDir, "json"),
 		"documents":   filepath.Join(appDataDir, "documents"),
 		"temp":        filepath.Join(appDataDir, "temp"),
 		"backup":      filepath.Join(appDataDir, "backup"),
 	}
 
-	for _, path := range dirs {
-		if err := os.MkdirAll(path, 0755); err != nil {
+	// Create all directories
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, err
 		}
 	}

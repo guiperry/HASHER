@@ -325,13 +325,13 @@ PIPELINE_DIR := pipeline
 define build-pipeline-binary
 	@echo "🔨 Building $(1) from $(2)..."
 	@mkdir -p $(EMBED_DIR)
-	cd $(PIPELINE_DIR)/$(2) && go build -ldflags "-s -w" -o ../../../$(EMBED_DIR)/$(1) $(3)
+	cd $(PIPELINE_DIR)/$(2) && go build -ldflags "-s -w" -o ../../$(EMBED_DIR)/$(1) $(3)
 	@echo "✅ Built: $(EMBED_DIR)/$(1)"
 endef
 
-## build-dataminer: Build data miner pipeline binary
-build-dataminer:
-	$(call build-pipeline-binary,dataminer,1_DATA_MINER,./cmd/dataminer)
+## build-data-miner: Build data miner pipeline binary
+build-data-miner:
+	$(call build-pipeline-binary,data-miner,1_DATA_MINER,./cmd/dataminer)
 
 ## build-data-encoder: Build data encoder pipeline binary
 build-data-encoder:

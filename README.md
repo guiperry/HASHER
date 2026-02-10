@@ -211,7 +211,176 @@ func BuildMiningHeader(projections []float32, salt uint32) []byte {
 }
 ```
 
-## Usage
+## CLI Usage
+
+The Hasher CLI provides an interactive terminal interface for managing ASIC devices, running diagnostics, and performing inference. Built with Bubble Tea, it features a modern TUI with real-time logs, chat interface, and menu navigation.
+
+### Starting the CLI
+
+```bash
+# Build and run
+make cli
+./bin/hasher
+
+# Or run directly
+make run-cli
+```
+
+The CLI automatically starts the `hasher-host` orchestrator in the background and displays initialization logs in a blue bordered view while the server starts up.
+
+### Menu Structure
+
+The CLI uses a hierarchical menu system with a **Primary Menu** and an **ASIC Configuration submenu**.
+
+#### Primary Menu
+
+The main menu provides top-level access to HASHER functionality:
+
+| Option | Name | Description |
+|--------|------|-------------|
+| **1** | Data Pipeline | Run the data processing pipeline (miner → encoder → trainer) |
+| **2** | ASIC Config | Open ASIC configuration submenu (Discovery, Probe, Provision, etc.) |
+| **3** | Test Chat | Interactive chat interface for hasher-based inference |
+| **0** | Quit | Exit the application |
+
+#### ASIC Configuration Submenu
+
+Accessed by selecting **Option 2 (ASIC Config)** from the Primary Menu:
+
+| Option | Name | Description |
+|--------|------|-------------|
+| **1** | Discovery | Discover ASIC devices on the network via network scanning |
+| **2** | Probe | Probe connected ASIC device to gather system information |
+| **3** | Protocol | Detect ASIC device communication protocol |
+| **4** | Provision | Deploy hasher-server binary to the ASIC device |
+| **5** | Troubleshoot | Run comprehensive troubleshooting diagnostics |
+| **6** | Configure | Configure hasher inference service settings |
+| **7** | Rules | Manage logical validation rules for inference |
+| **8** | Test | Test ASIC communication patterns and verify connectivity |
+| **9** | Back | Return to Primary Menu |
+
+### Navigation & Controls
+
+**Global Shortcuts:**
+- `↑/↓` - Navigate menu items or scroll views
+- `Enter` - Select menu item
+- `ESC` - Return to previous menu (Primary Menu from submenus, exits from views)
+- `Ctrl+C` - Copy selected text to clipboard
+- `Mouse` - Scroll views, select text
+
+**Menu Navigation:**
+- Select **ASIC Config** (Option 2) from Primary Menu to access device configuration options
+- Select **Back** (Option 9) from ASIC Config to return to Primary Menu
+- Press `ESC` in any view to return to the appropriate menu level
+
+**Chat View Navigation:**
+- `Tab` - Switch between chat and log views
+- `Ctrl+V` - Toggle text selection mode
+- `PgUp/PgDn` - Scroll by page
+- `↑/↓` or `j/k` - Scroll line by line
+
+**Text Selection Mode (Ctrl+V):**
+- Click and drag to select text
+- `Ctrl+C` - Copy selected text
+- Right-click - Copy all text from active view
+
+### Chat Commands
+
+When in chat mode, you can use these commands:
+
+```
+/quit           - Exit the application
+/menu           - Return to main menu
+/help           - Show available commands
+/rule add       - Add a logical rule
+/rule delete    - Delete a logical rule
+/rule list      - List all rules
+/status         - Show server and ASIC status
+/train          - Train crypto-transformer
+```
+
+**Rule Management Examples:**
+```
+/rule add temperature constraint "Valid range: -40 to 85"
+/rule list
+/rule delete temperature 0
+```
+
+### Data Pipeline Workflow
+
+The Data Pipeline (**Primary Menu → Option 1**) automates the complete data processing workflow:
+
+```
+Data Miner → Data Encoder → Data Trainer
+```
+
+**Pipeline Stages:**
+
+1. **Data Miner** (⛏️)
+   - Processes documents and PDFs
+   - Structures raw data for ML pipelines
+   - Reaches quota automatically
+
+2. **Data Encoder** (🔐)
+   - Performs tokenization
+   - Generates embeddings
+   - Prepares training data
+
+3. **Data Trainer** (🧠)
+   - Trains neural networks
+   - Optimizes model weights
+   - Completes training cycle
+
+**Pipeline View Features:**
+- Real-time progress bar showing overall completion
+- Stage status indicators (⏳ Pending / ▶️ Running / ✅ Complete)
+- Log output display in blue bordered view
+- Automatic progression between stages
+- Press `ESC` to return to menu at any time
+
+The pipeline runs each program from `~/.local/share/hasher/bin/` in sequence, waiting for each to reach its quota before starting the next.
+
+### Workflow Example
+
+Typical workflow for setting up a new ASIC device:
+
+```
+Primary Menu:
+  2. ASIC Config → Opens ASIC Configuration submenu
+
+ASIC Configuration Menu:
+  1. Discovery   → Finds ASIC devices on network
+  2. Probe       → Gathers device information
+  3. Protocol    → Detects communication protocol
+  4. Provision   → Deploys hasher-server binary
+  8. Test        → Verifies ASIC communication
+  9. Back        → Return to Primary Menu
+
+Primary Menu:
+  3. Test Chat   → Starts inference with ASIC
+```
+
+### Real-time Monitoring
+
+The CLI displays real-time information in the header and footer:
+
+- **Header**: Server status, ASIC device IP
+- **Footer**: CPU usage, RAM usage, Go version, device type
+- **Blue Box**: Initialization logs, pipeline logs
+- **Chat View**: Conversation history and server logs
+
+### CLI Configuration
+
+The CLI stores embedded binaries in:
+- `~/.local/share/hasher/bin/` (Linux)
+- `~/Library/Application Support/hasher/bin/` (macOS)
+- `%LOCALAPPDATA%\hasher\bin\` (Windows)
+
+Environment file (`.env`) is automatically copied to the bin directory if found in the project root.
+
+---
+
+## Programmatic Usage
 
 ### Creating and Using a Hash Network
 

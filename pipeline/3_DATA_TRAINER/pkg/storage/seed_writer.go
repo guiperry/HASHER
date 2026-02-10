@@ -1,34 +1,59 @@
 package storage
 
 import (
-	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go/reader"
 	"github.com/xitongsys/parquet-go/writer"
 )
 
-// SeedWriter handles writing best seeds back to the source training_frames.parquet file
+// SeedTrainingRecord matches the schema from 2_DATA_ENCODER/pkg/schema/output.go
+type SeedTrainingRecord struct {
+	SourceFile    string `parquet:"name=source_file, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	ChunkID       int32  `parquet:"name=chunk_id, type=INT32"`
+	WindowStart   int32  `parquet:"name=window_start, type=INT32"`
+	WindowEnd     int32  `parquet:"name=window_end, type=INT32"`
+	ContextLength int32  `parquet:"name=context_length, type=INT32"`
+	// ASIC input slots (12 x 4 bytes = 48 bytes)
+	AsicSlots0    int32  `parquet:"name=asic_slot_0, type=INT32"`
+	AsicSlots1    int32  `parquet:"name=asic_slot_1, type=INT32"`
+	AsicSlots2    int32  `parquet:"name=asic_slot_2, type=INT32"`
+	AsicSlots3    int32  `parquet:"name=asic_slot_3, type=INT32"`
+	AsicSlots4    int32  `parquet:"name=asic_slot_4, type=INT32"`
+	AsicSlots5    int32  `parquet:"name=asic_slot_5, type=INT32"`
+	AsicSlots6    int32  `parquet:"name=asic_slot_6, type=INT32"`
+	AsicSlots7    int32  `parquet:"name=asic_slot_7, type=INT32"`
+	AsicSlots8    int32  `parquet:"name=asic_slot_8, type=INT32"`
+	AsicSlots9    int32  `parquet:"name=asic_slot_9, type=INT32"`
+	AsicSlots10   int32  `parquet:"name=asic_slot_10, type=INT32"`
+	AsicSlots11   int32  `parquet:"name=asic_slot_11, type=INT32"`
+	TargetTokenID int32  `parquet:"name=target_token_id, type=INT32"`
+	BestSeed      string `parquet:"name=best_seed, type=BYTE_ARRAY, convertedtype=UTF8"`
+}
+
+// SeedWriter handles writing best seeds to a new training_frames_with_seeds.parquet file
+// Note: Parquet files are immutable, so we create a new file with updated seeds
 type SeedWriter struct {
 	sourceFile    string
+	outputFile    string
 	tempFile      string
-	backupFile    string
 	mu            sync.RWMutex
-	pendingWrites map[int32][]byte // token_id -> best_seed mapping
+	pendingWrites map[int32]string // token_id -> best_seed mapping
 }
 
 // NewSeedWriter creates a new SeedWriter for the given source file
 func NewSeedWriter(sourceFile string) *SeedWriter {
+	// Output to data-trainer's data directory instead of trying to modify source
+	outputFile := filepath.Join("data", "training_frames_with_seeds.parquet")
 	return &SeedWriter{
 		sourceFile:    sourceFile,
-		tempFile:      sourceFile + ".tmp",
-		backupFile:    sourceFile + ".backup." + fmt.Sprintf("%d", time.Now().Unix()),
-		pendingWrites: make(map[int32][]byte),
+		outputFile:    outputFile,
+		tempFile:      outputFile + ".tmp",
+		pendingWrites: make(map[int32]string),
 	}
 }
 
@@ -41,8 +66,7 @@ func (sw *SeedWriter) AddSeedWrite(tokenID int32, bestSeed []byte) error {
 		return fmt.Errorf("cannot write empty seed for token %d", tokenID)
 	}
 
-	sw.pendingWrites[tokenID] = make([]byte, len(bestSeed))
-	copy(sw.pendingWrites[tokenID], bestSeed)
+	sw.pendingWrites[tokenID] = string(bestSeed)
 
 	return nil
 }
@@ -64,7 +88,7 @@ func (sw *SeedWriter) GetPendingWriteCount() int {
 	return len(sw.pendingWrites)
 }
 
-// WriteBack commits all pending writes to the source parquet file
+// WriteBack commits all pending writes to a new parquet file with seeds
 func (sw *SeedWriter) WriteBack() error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -78,95 +102,25 @@ func (sw *SeedWriter) WriteBack() error {
 		return fmt.Errorf("source file does not exist: %s", sw.sourceFile)
 	}
 
-	// Create backup of original file
-	if err := sw.createBackup(); err != nil {
-		return fmt.Errorf("failed to create backup: %w", err)
-	}
-
-	// Read original file and update with best seeds
-	if err := sw.updateParquetFile(); err != nil {
-		// Attempt to restore from backup
-		if restoreErr := sw.restoreFromBackup(); restoreErr != nil {
-			return fmt.Errorf("failed to update file and restore backup: update_error=%w, restore_error=%w", err, restoreErr)
-		}
-		return fmt.Errorf("failed to update parquet file (backup restored): %w", err)
+	// Read original file and create new file with best seeds
+	if err := sw.createUpdatedParquetFile(); err != nil {
+		return fmt.Errorf("failed to create updated parquet file: %w", err)
 	}
 
 	// Clear pending writes after successful write
-	sw.pendingWrites = make(map[int32][]byte)
+	sw.pendingWrites = make(map[int32]string)
 
-	// Clean up backup file
-	os.Remove(sw.backupFile)
-
+	fmt.Printf("Successfully wrote updated training data to: %s\n", sw.outputFile)
 	return nil
 }
 
-// createBackup creates a backup of the source file
-func (sw *SeedWriter) createBackup() error {
-	source, err := os.Open(sw.sourceFile)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer source.Close()
-
-	backup, err := os.Create(sw.backupFile)
-	if err != nil {
-		return fmt.Errorf("failed to create backup file: %w", err)
-	}
-	defer backup.Close()
-
-	buf := make([]byte, 64*1024) // 64KB buffer
-	for {
-		n, err := source.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("failed to read source file: %w", err)
-		}
-
-		if _, err := backup.Write(buf[:n]); err != nil {
-			return fmt.Errorf("failed to write backup file: %w", err)
-		}
+// createUpdatedParquetFile reads the original parquet file and creates a new one with updated best seeds
+func (sw *SeedWriter) createUpdatedParquetFile() error {
+	// Ensure data directory exists
+	if err := os.MkdirAll(filepath.Dir(sw.outputFile), 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	return nil
-}
-
-// restoreFromBackup restores the source file from backup
-func (sw *SeedWriter) restoreFromBackup() error {
-	backup, err := os.Open(sw.backupFile)
-	if err != nil {
-		return fmt.Errorf("failed to open backup file: %w", err)
-	}
-	defer backup.Close()
-
-	source, err := os.Create(sw.sourceFile)
-	if err != nil {
-		return fmt.Errorf("failed to recreate source file: %w", err)
-	}
-	defer source.Close()
-
-	buf := make([]byte, 64*1024) // 64KB buffer
-	for {
-		n, err := backup.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("failed to read backup file: %w", err)
-		}
-
-		if _, err := source.Write(buf[:n]); err != nil {
-			return fmt.Errorf("failed to restore source file: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// updateParquetFile reads the original parquet file and writes a new one with updated best seeds
-func (sw *SeedWriter) updateParquetFile() error {
 	// Open original file for reading
 	fr, err := local.NewLocalFileReader(sw.sourceFile)
 	if err != nil {
@@ -174,8 +128,8 @@ func (sw *SeedWriter) updateParquetFile() error {
 	}
 	defer fr.Close()
 
-	// Create parquet reader
-	pr, err := reader.NewParquetReader(fr, new(ParquetTrainingRecord), 4)
+	// Create parquet reader using the correct schema
+	pr, err := reader.NewParquetReader(fr, new(SeedTrainingRecord), 4)
 	if err != nil {
 		return fmt.Errorf("failed to create parquet reader: %w", err)
 	}
@@ -193,15 +147,15 @@ func (sw *SeedWriter) updateParquetFile() error {
 	}
 	defer fw.Close()
 
-	// Create parquet writer
-	pw, err := writer.NewParquetWriter(fw, new(ParquetTrainingRecord), 4)
+	// Create parquet writer using the correct schema
+	pw, err := writer.NewParquetWriter(fw, new(SeedTrainingRecord), 4)
 	if err != nil {
 		return fmt.Errorf("failed to create parquet writer: %w", err)
 	}
 	defer pw.WriteStop()
 
 	// Read all records and update best seeds
-	parquetRecords := make([]ParquetTrainingRecord, numRows)
+	parquetRecords := make([]SeedTrainingRecord, numRows)
 	if err := pr.Read(&parquetRecords); err != nil {
 		return fmt.Errorf("failed to read parquet records: %w", err)
 	}
@@ -211,8 +165,8 @@ func (sw *SeedWriter) updateParquetFile() error {
 	for i := range parquetRecords {
 		record := &parquetRecords[i]
 		if bestSeed, exists := sw.pendingWrites[record.TargetTokenID]; exists {
-			// Convert byte seed to hex string for storage
-			record.BestSeed = hex.EncodeToString(bestSeed)
+			// Update seed directly as string (matches schema)
+			record.BestSeed = bestSeed
 			updatedCount++
 		}
 
@@ -227,32 +181,32 @@ func (sw *SeedWriter) updateParquetFile() error {
 		return fmt.Errorf("failed to stop parquet writer: %w", err)
 	}
 
-	// Replace original file with temporary file
-	if err := os.Remove(sw.sourceFile); err != nil {
-		return fmt.Errorf("failed to remove original file: %w", err)
+	// Replace temporary file with final output file
+	if err := os.Remove(sw.tempFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove temporary file: %w", err)
 	}
 
-	if err := os.Rename(sw.tempFile, sw.sourceFile); err != nil {
+	if err := os.Rename(sw.tempFile, sw.outputFile); err != nil {
 		return fmt.Errorf("failed to rename temporary file: %w", err)
 	}
 
+	fmt.Printf("Updated %d records with best seeds\n", updatedCount)
 	return nil
 }
 
-// GetSourceFile returns the source file path
-func (sw *SeedWriter) GetSourceFile() string {
-	return sw.sourceFile
+// GetOutputFile returns the output file path
+func (sw *SeedWriter) GetOutputFile() string {
+	return sw.outputFile
 }
 
 // GetPendingWrites returns a copy of pending writes (for debugging)
-func (sw *SeedWriter) GetPendingWrites() map[int32][]byte {
+func (sw *SeedWriter) GetPendingWrites() map[int32]string {
 	sw.mu.RLock()
 	defer sw.mu.RUnlock()
 
-	result := make(map[int32][]byte)
+	result := make(map[int32]string)
 	for token, seed := range sw.pendingWrites {
-		result[token] = make([]byte, len(seed))
-		copy(result[token], seed)
+		result[token] = seed
 	}
 
 	return result

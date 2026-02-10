@@ -16,6 +16,7 @@ import (
 	"dataminer/internal/arxiv"
 	"dataminer/internal/checkpoint"
 	"dataminer/internal/embedder"
+
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 	"github.com/xitongsys/parquet-go-source/local"
@@ -877,7 +878,7 @@ func estimateNextBatchSize(remainingQuota int) int {
 	return maxPapers
 }
 
-func runArxivMiningPhase(config *Config, sessionStats *SessionStats, maxPapers int) (int, error) {
+func runArxivMiningPhase(config *Config, _ *SessionStats, maxPapers int) (int, error) {
 	fmt.Printf("📥 Starting arXiv mining for up to %d papers...\n", maxPapers)
 
 	// Calculate how many papers we can download based on remaining quota

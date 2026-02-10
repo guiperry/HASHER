@@ -146,7 +146,7 @@ type SeedPopulation struct {
 
 type WeightRecord struct {
 	TokenID      int32   `json:"token_id"`
-	BestSeed     []byte  `json:"best_seed"`
+	BestSeed     string  `json:"best_seed"`
 	FitnessScore float64 `json:"fitness_score"`
 	Generation   int32   `json:"generation"`
 	ContextKey   uint32  `json:"context_key"`
@@ -333,21 +333,37 @@ func (eh *EvolutionaryHarness) calculateAlignmentReward(goldenNonce uint32, targ
 	diff := goldenNonce ^ uint32(targetToken)
 	matchingBits := bits.LeadingZeros32(diff)
 
-	// Exponential reward for matching more bits
-	// 0 matching bits = 0 reward, 32 matching bits = 1.0 reward
-	if matchingBits >= 16 {
-		// Strong prefix match (16+ bits) - high reward
-		return 0.5 + 0.5*float64(matchingBits-16)/16.0
-	} else if matchingBits >= 8 {
-		// Moderate prefix match (8-15 bits) - medium reward
-		return 0.2 + 0.3*float64(matchingBits-8)/8.0
-	} else if matchingBits >= 4 {
-		// Weak prefix match (4-7 bits) - small reward
-		return 0.05 + 0.15*float64(matchingBits-4)/4.0
+	// Calculate how many bits past the difficulty threshold
+	difficultyBits := 32 - bits.Len32(eh.DifficultyMask)
+	bitsAboveThreshold := matchingBits - difficultyBits
+
+	// REWARD SCHEME: Clear separation between "winning" and "not winning"
+	if matchingBits >= int(difficultyBits) {
+		// Passing the difficulty threshold - give high reward that increases with margin
+		// 16 bits on 16-bit difficulty = 0.85 (clear winner)
+		// 24 bits on 16-bit difficulty = 1.0 (exceptional)
+		baseReward := 0.85
+		if bitsAboveThreshold > 0 {
+			additional := float64(bitsAboveThreshold) / float64(32-difficultyBits) * 0.15
+			return baseReward + additional
+		}
+		return baseReward
 	}
 
-	// Minimal or no prefix match - tiny reward to encourage exploration
-	return 0.01 * float64(matchingBits) / 4.0
+	// Below difficulty threshold - much lower rewards to create clear gradient
+	if matchingBits >= 12 {
+		// Close but not passing - give partial reward
+		return 0.3 + 0.3*float64(matchingBits-12)/4.0
+	} else if matchingBits >= 8 {
+		// Moderate prefix - smaller reward
+		return 0.1 + 0.2*float64(matchingBits-8)/4.0
+	} else if matchingBits >= 4 {
+		// Weak prefix - tiny reward
+		return 0.02 + 0.08*float64(matchingBits-4)/4.0
+	}
+
+	// No meaningful prefix - essentially noise
+	return float64(matchingBits) / 32.0 * 0.02
 }
 
 func (eh *EvolutionaryHarness) calculateFormatReward(goldenNonce uint32, tokenToken int32, tokenMap map[int32]bool) float64 {

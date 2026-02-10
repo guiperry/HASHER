@@ -29,9 +29,10 @@ var (
 	dataPath       = flag.String("data", "data", "Path to data directory")
 	maxEpochs      = flag.Int("epochs", 10, "Maximum number of training epochs")
 	population     = flag.Int("population", 256, "Population size for evolution")
-	maxGenerations = flag.Int("generations", 20000, "Maximum number of generations")
-	difficultyBits = flag.Int("difficulty-bits", 16, "Number of leading bits that must match (8-32)")
+	maxGenerations = flag.Int("generations", 200, "Maximum number of generations")
+	difficultyBits = flag.Int("difficulty-bits", 32, "Number of leading bits that must match (8-32)")
 	verbose        = flag.Bool("verbose", false, "Enable verbose logging")
+	sequential     = flag.Bool("sequential", false, "Process tokens sequentially (cleaner logs)")
 )
 
 type TrainingOrchestrator struct {
@@ -45,6 +46,9 @@ type TrainingOrchestrator struct {
 	dataIngestor  *storage.DataIngestor
 	trainingData  []*training.TrainingRecord
 	seedWriter    *storage.SeedWriter
+	config        *config.Config
+	dataPath      string
+	sequential    bool
 }
 
 // ingestionLogger wraps the internal logging.Logger to implement storage.IngestionLogger
@@ -90,7 +94,7 @@ func getAppDataDir() (string, error) {
 			}
 			basePath = filepath.Join(userProfile, "AppData", "Local")
 		}
-		basePath = filepath.Join(basePath, "Hasher", "DataTrainer")
+		basePath = filepath.Join(basePath, "hasher", "data")
 	} else {
 		// Unix-like systems: ~/.local/share
 		home := os.Getenv("HOME")
@@ -106,7 +110,7 @@ func getAppDataDir() (string, error) {
 		if dataHome == "" {
 			dataHome = filepath.Join(home, ".local", "share")
 		}
-		basePath = filepath.Join(dataHome, "hasher", "data-trainer")
+		basePath = filepath.Join(dataHome, "hasher", "data")
 	}
 
 	// Create the directory if it doesn't exist
@@ -124,6 +128,12 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
 
+	// Load configuration file if specified
+	cfg, err := loadConfig(*configFile)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	loggingConfig := &logging.LoggingConfig{
 		Level:  "info",
 		Format: "text",
@@ -138,7 +148,7 @@ func main() {
 
 	logger.Info("Starting HASHER Data Trainer v1.0")
 
-	orchestrator, err := NewTrainingOrchestrator(logger)
+	orchestrator, err := NewTrainingOrchestrator(logger, cfg, *dataPath, *sequential)
 	if err != nil {
 		logger.Fatal("Failed to initialize orchestrator: %v", err)
 	}
@@ -163,9 +173,12 @@ func main() {
 	logger.Info("Training completed successfully")
 }
 
-func NewTrainingOrchestrator(logger *logging.Logger) (*TrainingOrchestrator, error) {
+func NewTrainingOrchestrator(logger *logging.Logger, cfg *config.Config, dataPath string, sequential bool) (*TrainingOrchestrator, error) {
 	orchestrator := &TrainingOrchestrator{
-		logger: logger,
+		logger:     logger,
+		config:     cfg,
+		dataPath:   dataPath,
+		sequential: sequential,
 	}
 
 	if err := orchestrator.initializeComponents(); err != nil {
@@ -182,6 +195,9 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 		return fmt.Errorf("failed to get app data directory: %w", err)
 	}
 	to.logger.Info("Using app data directory: %s", appDataDir)
+	if to.config != nil {
+		to.logger.Info("Configuration loaded from file")
+	}
 
 	to.logger.Info("Initializing simulator...")
 	simConfig := &simulator.SimulatorConfig{
@@ -212,7 +228,9 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	if err := os.MkdirAll(checkpointPath, 0755); err != nil {
 		return fmt.Errorf("failed to create checkpoint directory: %w", err)
 	}
-	checkpointMgr := storage.NewCheckpointManager(filepath.Join(checkpointPath, "checkpoints.db"))
+	checkpointFile := filepath.Join(checkpointPath, "checkpoints.db")
+	to.logger.Info("Checkpoint database: %s", checkpointFile)
+	checkpointMgr := storage.NewCheckpointManager(checkpointFile)
 	if err := checkpointMgr.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize checkpoint manager: %w", err)
 	}
@@ -220,7 +238,17 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 
 	// Initialize data ingestion - REQUIRED
 	to.logger.Info("Initializing data ingestion...")
-	trainingDataPath := filepath.Join(os.Getenv("HOME"), ".local", "share", "data-encoder", "training_frames.parquet")
+	if to.sequential {
+		to.logger.Info("Sequential processing enabled (cleaner logs)")
+	}
+	var trainingDataPath string
+	if to.dataPath != "" {
+		// Use provided data directory, expecting training_frames.parquet inside
+		trainingDataPath = filepath.Join(to.dataPath, "training_frames.parquet")
+	} else {
+		// Default path
+		trainingDataPath = filepath.Join(os.Getenv("HOME"), ".local", "share", "hasher", "data", "training_frames.parquet")
+	}
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
 	}
@@ -306,16 +334,18 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 func (to *TrainingOrchestrator) Run(ctx context.Context, maxEpochs, populationSize int) error {
 	to.logger.Info("Starting training with %d epochs, population size %d", maxEpochs, populationSize)
 
-	// Training data is required - no synthetic fallback
 	if len(to.trainingData) == 0 {
-		return fmt.Errorf("no training data available - data ingestion failed during initialization")
+		// Fallback to synthetic training
+		to.logger.Warn("No training data available, falling back to synthetic training")
+		tokenMap := to.createTokenMap()
+		return to.runSyntheticTraining(ctx, maxEpochs, populationSize, tokenMap)
 	}
 
 	to.logger.Info("Training with %d ingested records", len(to.trainingData))
 	return to.runTrainingWithData(ctx, maxEpochs, populationSize, to.trainingData)
 }
 
-func (to *TrainingOrchestrator) runSyntheticTraining(ctx context.Context, maxEpochs, populationSize int, tokenMap map[int32]bool) error {
+func (to *TrainingOrchestrator) runSyntheticTraining(ctx context.Context, maxEpochs, _ int, tokenMap map[int32]bool) error {
 	for epoch := 0; epoch < maxEpochs; epoch++ {
 		select {
 		case <-ctx.Done():
@@ -429,6 +459,11 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 	tokenMap := map[int32]bool{record.TargetToken: true}
 
 	for gen := 0; gen < *maxGenerations; gen++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		results, err := to.harness.EvaluatePopulation(pop, record, tokenMap, to.simulator)
 		if err != nil {
 			return fmt.Errorf("failed to evaluate population: %w", err)
@@ -495,6 +530,11 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 	}
 
 	for gen := 0; gen < *maxGenerations; gen++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		results, err := to.harness.EvaluatePopulation(pop, record, tokenMap, to.simulator)
 		if err != nil {
 			return fmt.Errorf("failed to evaluate population: %w", err)
@@ -535,14 +575,9 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 }
 
 func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training.SeedResult, generation int) error {
-	to.logger.Debug("Saving winning seed for token %d with length %d", targetToken, len(seed.Seed))
-	if len(seed.Seed) == 0 {
-		to.logger.Warn("Attempting to save an empty seed for token %d!", targetToken)
-	}
-
 	weightRecord := storage.WeightRecord{
 		TokenID:      targetToken,
-		BestSeed:     seed.Seed,
+		BestSeed:     string(seed.Seed),
 		FitnessScore: seed.Reward,
 		Generation:   int32(generation),
 		ContextKey:   training.ComputeContextHash([]int32{targetToken}, 5),
@@ -565,14 +600,18 @@ func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training
 		return fmt.Errorf("failed to save checkpoint: %w", err)
 	}
 
-	// Queue the best seed for write-back to source training_frames.parquet
+	// Immediately write best seed back to training_frames.parquet
 	if err := to.seedWriter.AddSeedWrite(targetToken, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", targetToken, err)
 	} else {
-		to.logger.Debug("Queued seed write-back for token %d", targetToken)
+		if err := to.seedWriter.WriteBack(); err != nil {
+			to.logger.Error("Failed to write seed back to parquet: %v", err)
+		} else {
+			to.logger.Info("Wrote best seed for token %d to %s", targetToken, filepath.Base(to.seedWriter.GetOutputFile()))
+		}
 	}
 
-	to.logger.Info("Saved winning seed for token %d (fitness=%.4f)", targetToken, seed.Reward)
+	to.logger.Info("Saved checkpoint for token %d (fitness=%.4f) [gen=%d]", targetToken, seed.Reward, generation)
 	return nil
 }
 
@@ -585,34 +624,16 @@ func (to *TrainingOrchestrator) saveProgress(epoch int) error {
 	to.logger.Info("Progress checkpoint at epoch %d: %d tokens, avg_fitness=%.4f",
 		epoch, summary.TotalTokens, summary.AverageFitness)
 
-	// Write back pending seeds every 2 epochs
-	if epoch%2 == 0 {
-		pendingCount := to.seedWriter.GetPendingWriteCount()
-		if pendingCount > 0 {
-			to.logger.Info("Writing back %d pending best seeds to training_frames.parquet", pendingCount)
-			if err := to.seedWriter.WriteBack(); err != nil {
-				to.logger.Error("Failed to write back seeds: %v", err)
-				return err
-			}
-			to.logger.Info("Successfully wrote back best seeds to %s", to.seedWriter.GetSourceFile())
-		}
-	}
-
+	// Seeds are now written back immediately after each win, nothing to do here
 	return nil
 }
 
 func (to *TrainingOrchestrator) finalizeTraining() error {
 	to.logger.Info("Finalizing training...")
 
-	// Final write-back of any remaining pending seeds
-	pendingCount := to.seedWriter.GetPendingWriteCount()
-	if pendingCount > 0 {
-		to.logger.Info("Final write-back of %d remaining best seeds to training_frames.parquet", pendingCount)
-		if err := to.seedWriter.WriteBack(); err != nil {
-			to.logger.Error("Failed to write back final seeds: %v", err)
-			return err
-		}
-		to.logger.Info("Successfully wrote back final best seeds to %s", to.seedWriter.GetSourceFile())
+	// Seeds are written back immediately after each win, just do final checkpoint save
+	if err := to.checkpointMgr.Close(); err != nil {
+		to.logger.Warn("Failed to save final checkpoints: %v", err)
 	}
 
 	layers, err := to.storage.ListLayers()

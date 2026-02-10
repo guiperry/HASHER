@@ -233,7 +233,7 @@ func (fm *FlashManager) flashWeights(ctx context.Context, weights []storage.Weig
 	for _, weight := range weights {
 		key := fmt.Sprintf("token_%d", weight.TokenID)
 
-		if err := bpf.updateElement(key, weight.BestSeed); err != nil {
+		if err := bpf.updateElement(key, []byte(weight.BestSeed)); err != nil {
 			return fmt.Errorf("failed to update BPF element for token %d: %w", weight.TokenID, err)
 		}
 	}
@@ -291,7 +291,7 @@ func (fm *FlashManager) validateDeployment(ctx context.Context, weights []storag
 			return fmt.Errorf("failed to retrieve weight for token %d: %w", weight.TokenID, err)
 		}
 
-		errorMargin := fm.calculateErrorMargin(weight.BestSeed, retrievedSeed)
+		errorMargin := fm.calculateErrorMargin([]byte(weight.BestSeed), retrievedSeed)
 		totalErrorMargin += errorMargin
 
 		if errorMargin <= validationReq.MaxErrorMargin {

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -12,10 +13,13 @@ import (
 )
 
 type CheckpointManager struct {
-	dbPath    string
-	db        map[string][]byte
-	mutex     sync.RWMutex
-	batchSize int
+	dbPath           string
+	db               map[string][]byte
+	mutex            sync.RWMutex
+	batchSize        int
+	dirty            bool
+	lastSave         time.Time
+	autoSaveInterval time.Duration
 }
 
 type CheckpointConfig struct {
@@ -37,9 +41,10 @@ type CheckpointSummary struct {
 
 func NewCheckpointManager(dbPath string) *CheckpointManager {
 	return &CheckpointManager{
-		dbPath:    dbPath,
-		db:        make(map[string][]byte),
-		batchSize: 100,
+		dbPath:           dbPath,
+		db:               make(map[string][]byte),
+		batchSize:        100,
+		autoSaveInterval: 30 * time.Second,
 	}
 }
 
@@ -47,6 +52,21 @@ func (cm *CheckpointManager) Initialize() error {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 
+	// Load checkpoints from disk if file exists
+	if cm.dbPath != "" {
+		data, err := os.ReadFile(cm.dbPath)
+		if err == nil {
+			var savedDB map[string][]byte
+			if err := json.Unmarshal(data, &savedDB); err == nil {
+				cm.db = savedDB
+				fmt.Printf("[CHECKPOINT] Loaded %d checkpoints from %s\n", len(cm.db), cm.dbPath)
+			}
+		} else if !os.IsNotExist(err) {
+			fmt.Printf("[CHECKPOINT] Warning: could not load checkpoints: %v\n", err)
+		}
+	}
+
+	cm.lastSave = time.Now()
 	return nil
 }
 
@@ -54,7 +74,39 @@ func (cm *CheckpointManager) Close() error {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 
+	return cm.saveToDiskUnlocked()
+}
+
+func (cm *CheckpointManager) saveToDiskUnlocked() error {
+	if cm.dbPath == "" || !cm.dirty {
+		return nil
+	}
+
+	data, err := json.Marshal(cm.db)
+	if err != nil {
+		return fmt.Errorf("failed to marshal checkpoints: %w", err)
+	}
+
+	// Write to temp file first, then rename for atomicity
+	tmpPath := cm.dbPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write checkpoints: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, cm.dbPath); err != nil {
+		return fmt.Errorf("failed to atomic-save checkpoints: %w", err)
+	}
+
+	fmt.Printf("[CHECKPOINT] Saved %d checkpoints to %s\n", len(cm.db), cm.dbPath)
+	cm.dirty = false
+	cm.lastSave = time.Now()
 	return nil
+}
+
+func (cm *CheckpointManager) maybeAutoSave() {
+	if time.Since(cm.lastSave) >= cm.autoSaveInterval {
+		cm.saveToDiskUnlocked()
+	}
 }
 
 func (cm *CheckpointManager) SaveCheckpoint(entry training.CheckpointEntry) error {
@@ -70,6 +122,13 @@ func (cm *CheckpointManager) SaveCheckpoint(entry training.CheckpointEntry) erro
 	}
 
 	cm.db[string(tokenKey)] = data
+	cm.dirty = true
+
+	// Immediately persist to disk for durability
+	if err := cm.saveToDiskUnlocked(); err != nil {
+		fmt.Printf("[CHECKPOINT] Warning: failed to persist checkpoint: %v\n", err)
+	}
+
 	return nil
 }
 
@@ -127,6 +186,13 @@ func (cm *CheckpointManager) BatchSaveCheckpoints(entries []training.CheckpointE
 		}
 
 		cm.db[string(tokenKey)] = data
+	}
+
+	cm.dirty = true
+
+	// Immediately persist to disk for durability
+	if err := cm.saveToDiskUnlocked(); err != nil {
+		fmt.Printf("[CHECKPOINT] Warning: failed to persist batch: %v\n", err)
 	}
 
 	return nil

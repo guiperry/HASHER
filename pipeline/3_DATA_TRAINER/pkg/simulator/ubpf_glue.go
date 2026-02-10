@@ -89,7 +89,7 @@ type TrainingFrame struct {
 	AsicSlots10   int32
 	AsicSlots11   int32
 	TargetTokenID int32
-	BestSeed      uint32 // This is what we're trying to optimize
+	BestSeed      string // This is what we're trying to optimize
 }
 
 // ToBitcoinHeader converts a TrainingFrame to an 80-byte Bitcoin header
@@ -139,7 +139,7 @@ func RunEvolutionaryPass(bytecode []byte, trainingBatch []TrainingFrame) {
 		}
 
 		// Store the best seed found
-		frame.BestSeed = result.Nonce
+		frame.BestSeed = fmt.Sprintf("%d", result.Nonce)
 
 		fmt.Printf("[Frame %d] Golden nonce: %d (alignment: %.3f, stability: %.3f)\n",
 			i, result.Nonce, result.Alignment, result.Stability)

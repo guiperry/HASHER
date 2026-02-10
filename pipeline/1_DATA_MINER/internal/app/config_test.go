@@ -14,6 +14,10 @@ func TestConfigParquetFile(t *testing.T) {
 		OutputFile:  "/backup/data.json",
 	}
 
+	if config.InputDir != "/input" {
+		t.Errorf("InputDir mismatch: expected /input, got %s", config.InputDir)
+	}
+
 	if config.ParquetFile == "" {
 		t.Error("Config should have ParquetFile field")
 	}
@@ -76,6 +80,44 @@ func TestConfigDefaultPaths(t *testing.T) {
 	if !strings.Contains(config.OutputFile, "backup") {
 		t.Error("OutputFile (JSON backup) should be in backup directory")
 	}
+
+	// Verify other configuration fields
+	if config.InputDir != dirs["documents"] {
+		t.Errorf("InputDir mismatch: expected %s, got %s", dirs["documents"], config.InputDir)
+	}
+	if config.NumWorkers != 4 {
+		t.Errorf("NumWorkers mismatch: expected 4, got %d", config.NumWorkers)
+	}
+	if config.ChunkSize != 150 {
+		t.Errorf("ChunkSize mismatch: expected 150, got %d", config.ChunkSize)
+	}
+	if config.ChunkOverlap != 25 {
+		t.Errorf("ChunkOverlap mismatch: expected 25, got %d", config.ChunkOverlap)
+	}
+	if config.OllamaModel != "nomic-embed-text" {
+		t.Errorf("OllamaModel mismatch: expected nomic-embed-text, got %s", config.OllamaModel)
+	}
+	if config.OllamaHost != "http://localhost:11434" {
+		t.Errorf("OllamaHost mismatch: expected http://localhost:11434, got %s", config.OllamaHost)
+	}
+	expectedCheckpoint := filepath.Join(dirs["checkpoints"], "checkpoints.db")
+	if config.CheckpointDB != expectedCheckpoint {
+		t.Errorf("CheckpointDB mismatch: expected %s, got %s", expectedCheckpoint, config.CheckpointDB)
+	}
+	if config.BatchSize != 4 {
+		t.Errorf("BatchSize mismatch: expected 4, got %d", config.BatchSize)
+	}
+	if config.AppDataDir != appDataDir {
+		t.Errorf("AppDataDir mismatch: expected %s, got %s", appDataDir, config.AppDataDir)
+	}
+	// Verify DataDirs mapping
+	for key, expected := range dirs {
+		if actual, ok := config.DataDirs[key]; !ok {
+			t.Errorf("DataDirs missing key %s", key)
+		} else if actual != expected {
+			t.Errorf("DataDirs[%s] mismatch: expected %s, got %s", key, expected, actual)
+		}
+	}
 }
 
 func TestConfigDataDirs(t *testing.T) {
@@ -92,6 +134,11 @@ func TestConfigDataDirs(t *testing.T) {
 	config := &Config{
 		AppDataDir: appDataDir,
 		DataDirs:   dirs,
+	}
+
+	// Verify AppDataDir is set correctly
+	if config.AppDataDir != appDataDir {
+		t.Errorf("AppDataDir mismatch: expected %s, got %s", appDataDir, config.AppDataDir)
 	}
 
 	// Test JSON directory is under backup
@@ -123,6 +170,10 @@ func TestDocumentRecordParquetTags(t *testing.T) {
 
 	if record.ChunkID != 1 {
 		t.Error("ChunkID field not set correctly")
+	}
+
+	if record.Content != "test content" {
+		t.Errorf("Content field not set correctly: expected 'test content', got %s", record.Content)
 	}
 
 	if len(record.Embedding) != 3 {

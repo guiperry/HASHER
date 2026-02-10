@@ -3,7 +3,7 @@
 
 # Project configuration
 PROJECT_NAME := dataminer
-BINARY_NAME := dataminer
+BINARY_NAME := data-miner
 MAIN_PACKAGE := ./cmd/$(PROJECT_NAME)
 BIN_DIR := bin
 BUILD_DIR := build

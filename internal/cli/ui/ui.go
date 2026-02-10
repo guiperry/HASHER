@@ -3,7 +3,9 @@ package ui
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -19,16 +21,19 @@ import (
 	psmem "github.com/shirou/gopsutil/v3/mem"
 
 	"hasher/internal/analyzer"
+	"hasher/internal/cli/embedded"
 	"hasher/internal/client"
 	"hasher/internal/hasher"
 )
 
 // View states
 const (
-	MainMenuView = iota
+	PrimaryMenuView = iota
+	AsicConfigView
 	ChatView
 	ProgressView
 	LogView
+	PipelineView
 )
 
 // Styles
@@ -140,63 +145,84 @@ func (i menuItem) Title() string       { return i.title }
 func (i menuItem) Description() string { return i.description }
 func (i menuItem) FilterValue() string { return i.title }
 
-var menuItems = []list.Item{
+// Primary menu items (top-level menu)
+var primaryMenuItems = []list.Item{
 	menuItem{
-		title:       "1. Discovery",
-		description: "Discover ASIC devices on the network",
-		view:        MainMenuView,
+		title:       "1. Data Pipeline",
+		description: "Run the data processing pipeline (miner → encoder → trainer)",
+		view:        PipelineView,
 	},
 	menuItem{
-		title:       "2. Probe",
-		description: "Probe connected ASIC device",
-		view:        MainMenuView,
+		title:       "2. ASIC Config",
+		description: "Configure ASIC devices (Discovery, Probe, Protocol, Provision, Troubleshoot)",
+		view:        AsicConfigView,
 	},
 	menuItem{
-		title:       "3. Protocol",
-		description: "Detect ASIC device protocol",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "4. Provision",
-		description: "Deploy hasher-server to ASIC device",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "5. Troubleshoot",
-		description: "Run troubleshooting diagnostics",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "6. Configure",
-		description: "Configure hasher inference service",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "7. Rules",
-		description: "Manage logical validation rules",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "8. Test",
-		description: "Test ASIC communication pattern",
-		view:        MainMenuView,
-	},
-	menuItem{
-		title:       "9. Chat",
-		description: "Test hasher validation service",
+		title:       "3. Test Chat",
+		description: "Test hasher validation service via chat interface",
 		view:        ChatView,
 	},
 	menuItem{
 		title:       "0. Quit",
 		description: "Exit the application",
-		view:        MainMenuView,
+		view:        PrimaryMenuView,
+	},
+}
+
+// ASIC Config menu items (secondary menu)
+var asicConfigMenuItems = []list.Item{
+	menuItem{
+		title:       "1. Discovery",
+		description: "Discover ASIC devices on the network",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "2. Probe",
+		description: "Probe connected ASIC device",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "3. Protocol",
+		description: "Detect ASIC device protocol",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "4. Provision",
+		description: "Deploy hasher-server to ASIC device",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "5. Troubleshoot",
+		description: "Run troubleshooting diagnostics",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "6. Configure",
+		description: "Configure hasher inference service",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "7. Rules",
+		description: "Manage logical validation rules",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "8. Test",
+		description: "Test ASIC communication pattern",
+		view:        AsicConfigView,
+	},
+	menuItem{
+		title:       "9. Back",
+		description: "Return to main menu",
+		view:        PrimaryMenuView,
 	},
 }
 
 // Model represents the application state
 type Model struct {
 	CurrentView    int
-	MainMenu       list.Model
+	PrimaryMenu    list.Model
+	AsicConfigMenu list.Model
 	ChatView       textarea.Model
 	LogView        textarea.Model
 	InitView       viewport.Model // Initialization logs view (using viewport for scrolling)
@@ -228,6 +254,12 @@ type Model struct {
 	ChatContent string
 	LogContent  string
 	InitContent string // Initialization log content
+
+	// Data Pipeline state
+	PipelineRunning  bool
+	PipelineStage    string // Current stage: "miner", "encoder", "trainer", "complete"
+	PipelineProgress float64
+	PipelineLogs     []string
 }
 
 // NewModel creates a new UI model
@@ -240,11 +272,17 @@ func NewModel() Model {
 		menuHeight = 6
 	}
 
-	// Initialize menu with proper initial size
-	menuList := list.New(menuItems, list.NewDefaultDelegate(), defaultWidth-4, menuHeight)
-	menuList.Title = "Hasher CLI - Main Menu"
-	menuList.SetShowStatusBar(false)
-	menuList.SetFilteringEnabled(false)
+	// Initialize primary menu
+	primaryMenuList := list.New(primaryMenuItems, list.NewDefaultDelegate(), defaultWidth-4, menuHeight)
+	primaryMenuList.Title = "Hasher CLI - Main Menu"
+	primaryMenuList.SetShowStatusBar(false)
+	primaryMenuList.SetFilteringEnabled(false)
+
+	// Initialize ASIC Config menu
+	asicConfigMenuList := list.New(asicConfigMenuItems, list.NewDefaultDelegate(), defaultWidth-4, menuHeight)
+	asicConfigMenuList.Title = "ASIC Configuration"
+	asicConfigMenuList.SetShowStatusBar(false)
+	asicConfigMenuList.SetFilteringEnabled(false)
 
 	// Initialize chat view as textarea for text selection support
 	chatView := textarea.New()
@@ -292,8 +330,9 @@ func NewModel() Model {
 
 	// Create model with initial data
 	model := Model{
-		CurrentView:    MainMenuView,
-		MainMenu:       menuList,
+		CurrentView:    PrimaryMenuView,
+		PrimaryMenu:    primaryMenuList,
+		AsicConfigMenu: asicConfigMenuList,
 		ChatView:       chatView,
 		LogView:        logView,
 		InitView:       initView,
@@ -434,11 +473,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case PipelineProgressMsg:
+		m.PipelineStage = msg.Stage
+		m.PipelineProgress = msg.Progress
+		if msg.Log != "" {
+			m.PipelineLogs = append(m.PipelineLogs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.Log))
+			// Keep only last 100 logs
+			if len(m.PipelineLogs) > 100 {
+				m.PipelineLogs = m.PipelineLogs[len(m.PipelineLogs)-100:]
+			}
+		}
+
+	case PipelineCompleteMsg:
+		m.PipelineRunning = false
+		m.PipelineStage = "complete"
+		if msg.Success {
+			m.PipelineProgress = 1.0
+			m.PipelineLogs = append(m.PipelineLogs, fmt.Sprintf("[%s] ✓ Pipeline completed successfully!", time.Now().Format("15:04:05")))
+		} else {
+			m.PipelineLogs = append(m.PipelineLogs, fmt.Sprintf("[%s] ✗ Pipeline failed: %s", time.Now().Format("15:04:05"), msg.Message))
+		}
+
+		// Also add to chat history
+		if msg.Success {
+			m.ChatHistory = append(m.ChatHistory, progressStyle.Render("Data Pipeline Complete!"))
+			m.ChatHistory = append(m.ChatHistory, "All pipeline stages finished successfully.")
+		} else {
+			m.ChatHistory = append(m.ChatHistory, errorStyle.Render("Data Pipeline Failed"))
+			m.ChatHistory = append(m.ChatHistory, msg.Message)
+		}
+		m.updateChatView()
+
 		// Note: scrollbarUpdateMsg removed - textarea handles scrolling natively
 	}
 
 	switch m.CurrentView {
-	case MainMenuView:
+	case PrimaryMenuView:
 		// If in initialization mode, handle InitView scrolling
 		if m.ServerStarting && !m.ServerReady {
 			// Pass message to viewport for mouse wheel support
@@ -460,15 +530,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		} else {
-			// Normal menu mode
-			m.MainMenu, cmd = m.MainMenu.Update(msg)
+			// Primary menu mode
+			m.PrimaryMenu, cmd = m.PrimaryMenu.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 
 		if msg, ok := msg.(tea.KeyMsg); ok {
 			switch msg.Type {
 			case tea.KeyEnter:
-				if i, ok := m.MainMenu.SelectedItem().(menuItem); ok {
+				if i, ok := m.PrimaryMenu.SelectedItem().(menuItem); ok {
+					switch i.title {
+					case "1. Data Pipeline":
+						m.CurrentView = PipelineView
+						m.PipelineRunning = true
+						m.PipelineStage = "initializing"
+						m.PipelineProgress = 0
+						m.PipelineLogs = []string{"Initializing data pipeline workflow..."}
+						cmds = append(cmds, m.runDataPipeline())
+					case "2. ASIC Config":
+						m.CurrentView = AsicConfigView
+					case "3. Test Chat":
+						m.CurrentView = ChatView
+					case "0. Quit":
+						return m, tea.Quit
+					}
+				}
+			}
+		}
+
+	case AsicConfigView:
+		// ASIC Config submenu mode
+		m.AsicConfigMenu, cmd = m.AsicConfigMenu.Update(msg)
+		cmds = append(cmds, cmd)
+
+		if msg, ok := msg.(tea.KeyMsg); ok {
+			switch msg.Type {
+			case tea.KeyEnter:
+				if i, ok := m.AsicConfigMenu.SelectedItem().(menuItem); ok {
 					switch i.title {
 					case "1. Discovery":
 						m.CurrentView = ChatView
@@ -506,10 +604,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.ChatHistory = append(m.ChatHistory, infoStyle.Render("Running Communication Test..."))
 						m.updateChatView()
 						cmds = append(cmds, m.runTest)
-					case "9. Chat":
-						m.CurrentView = ChatView
-					case "0. Quit":
-						return m, tea.Quit
+					case "9. Back":
+						m.CurrentView = PrimaryMenuView
 					}
 				}
 			}
@@ -525,7 +621,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Input.Reset()
 				}
 			case tea.KeyEsc:
-				m.CurrentView = MainMenuView
+				m.CurrentView = PrimaryMenuView
 			case tea.KeyUp:
 				m.ChatView.CursorUp()
 			case tea.KeyDown:
@@ -641,6 +737,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.Input, cmd = m.Input.Update(msg)
 		cmds = append(cmds, cmd)
+
+	case PipelineView:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.CurrentView = PrimaryMenuView
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -649,19 +754,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the UI
 func (m Model) View() string {
 	switch m.CurrentView {
-	case MainMenuView:
-		return m.renderMainMenu()
+	case PrimaryMenuView:
+		return m.renderPrimaryMenu()
+	case AsicConfigView:
+		return m.renderAsicConfigMenu()
 	case ChatView:
 		return m.renderChatView()
 	case ProgressView:
 		return m.renderProgressView()
+	case PipelineView:
+		return m.renderPipelineView()
 	}
 
-	return m.renderMainMenu()
+	return m.renderPrimaryMenu()
 }
 
-// renderMainMenu renders the main menu
-func (m Model) renderMainMenu() string {
+// renderPrimaryMenu renders the primary/main menu
+func (m Model) renderPrimaryMenu() string {
 	serverStatus := "Server: Stopped"
 	if m.ServerReady {
 		serverStatus = "Server: Ready"
@@ -728,9 +837,60 @@ func (m Model) renderMainMenu() string {
 
 		mainContent = listStyle.Copy().Width(m.Width - 4).Height(menuHeight).Render(initBoxContent)
 	} else {
-		// Show normal menu
-		mainContent = listStyle.Copy().Width(m.Width - 4).Height(menuHeight).Render(m.MainMenu.View())
+		// Show primary menu
+		mainContent = listStyle.Copy().Width(m.Width - 4).Height(menuHeight).Render(m.PrimaryMenu.View())
 	}
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		logo,
+		mainContent,
+		footer,
+	)
+}
+
+// renderAsicConfigMenu renders the ASIC Configuration submenu
+func (m Model) renderAsicConfigMenu() string {
+	serverStatus := "Server: Stopped"
+	if m.ServerReady {
+		serverStatus = "Server: Ready"
+	} else if m.ServerStarting {
+		serverStatus = "Server: Starting..."
+	}
+
+	// Build header
+	leftContent := fmt.Sprintf(" Hasher CLI Tool - ASIC Config | %s", serverStatus)
+	deviceStatus := ""
+	if m.DeviceIP != "" {
+		deviceStatus = fmt.Sprintf("ASIC: %s ", m.DeviceIP)
+	}
+
+	padding := m.Width - len(leftContent) - len(deviceStatus) - 4
+	if padding < 1 {
+		padding = 1
+	}
+	headerContent := leftContent + strings.Repeat(" ", padding) + deviceStatus
+	header := headerStyle.Width(m.Width).Render(headerContent)
+
+	// Build footer
+	footerRight := ""
+	if m.DeviceType != "" {
+		footerRight = fmt.Sprintf(" | %s", m.DeviceType)
+	}
+	footer := footerStyle.Width(m.Width).Render(m.ResourceData + footerRight)
+
+	// Render the logo centered
+	logo := logoStyle.Render(hasherLogo)
+
+	// Menu height calculation
+	menuHeight := m.Height - 13
+	if menuHeight < 6 {
+		menuHeight = 6
+	}
+
+	// Show ASIC Config menu
+	mainContent := listStyle.Copy().Width(m.Width - 4).Height(menuHeight).Render(m.AsicConfigMenu.View())
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -914,6 +1074,149 @@ func (m Model) renderProgressView() string {
 	)
 }
 
+// renderPipelineView renders the data pipeline workflow view
+func (m Model) renderPipelineView() string {
+	serverStatus := "Server: Stopped"
+	if m.ServerReady {
+		serverStatus = "Server: Ready"
+	} else if m.ServerStarting {
+		serverStatus = "Server: Starting..."
+	}
+
+	// Build header
+	leftContent := fmt.Sprintf(" Hasher CLI - Data Pipeline | %s", serverStatus)
+	rightContent := "ESC=menu"
+	if m.DeviceIP != "" {
+		rightContent = fmt.Sprintf("ASIC: %s | %s", m.DeviceIP, rightContent)
+	}
+
+	padding := m.Width - len(leftContent) - len(rightContent) - 4
+	if padding < 1 {
+		padding = 1
+	}
+	headerContent := leftContent + strings.Repeat(" ", padding) + rightContent
+	header := headerStyle.Width(m.Width).Render(headerContent)
+
+	// Build footer
+	footerRight := ""
+	if m.DeviceType != "" {
+		footerRight = fmt.Sprintf(" | %s", m.DeviceType)
+	}
+	footerText := m.ResourceData + footerRight
+	if m.ShowCopyNotice {
+		copyNotice := copyNoticeStyle.Render("✓ Copied to clipboard")
+		footerText += " " + copyNotice
+	}
+	footer := footerStyle.Width(m.Width).Render(footerText)
+
+	// Calculate dimensions for pipeline view
+	contentHeight := m.Height - 5 // header + footer + margins
+	if contentHeight < 10 {
+		contentHeight = 10
+	}
+
+	// Build pipeline content
+	var content strings.Builder
+
+	// Title
+	content.WriteString(progressStyle.Render("📊 Data Pipeline Workflow\n"))
+	content.WriteString(strings.Repeat("─", m.Width-8) + "\n\n")
+
+	// Pipeline stages
+	stages := []struct {
+		name   string
+		desc   string
+		symbol string
+	}{
+		{"data-miner", "Document structuring and PDF processing", "⛏️"},
+		{"data-encoder", "Tokenization and embedding generation", "🔐"},
+		{"data-trainer", "Neural network training and optimization", "🧠"},
+	}
+
+	for i, stage := range stages {
+		stageNum := i + 1
+		status := "⏳ Pending"
+		if m.PipelineStage == stage.name {
+			status = "▶️ Running..."
+		} else if m.PipelineProgress > float64(i) {
+			status = "✅ Complete"
+		}
+
+		content.WriteString(fmt.Sprintf("%s Stage %d: %s %s\n", stage.symbol, stageNum, stage.name, status))
+		content.WriteString(fmt.Sprintf("   %s\n\n", stage.desc))
+	}
+
+	// Progress bar
+	progressBar := m.renderProgressBar(m.PipelineProgress, m.Width-8)
+	content.WriteString(fmt.Sprintf("\nProgress: %.0f%%\n", m.PipelineProgress*100))
+	content.WriteString(progressBar + "\n\n")
+
+	// Pipeline logs section (similar to initialization view)
+	if len(m.PipelineLogs) > 0 {
+		content.WriteString(infoStyle.Render("📋 Pipeline Logs:\n"))
+		content.WriteString(strings.Repeat("─", m.Width-8) + "\n")
+
+		// Show last N logs that fit
+		logHeight := contentHeight - 15 // Account for other content
+		if logHeight < 3 {
+			logHeight = 3
+		}
+
+		startIdx := 0
+		if len(m.PipelineLogs) > logHeight {
+			startIdx = len(m.PipelineLogs) - logHeight
+		}
+
+		for i := startIdx; i < len(m.PipelineLogs); i++ {
+			logLine := m.PipelineLogs[i]
+			// Truncate if too long
+			if len(logLine) > m.Width-8 {
+				logLine = logLine[:m.Width-11] + "..."
+			}
+			content.WriteString(logLine + "\n")
+		}
+	}
+
+	// Render the pipeline view in a blue box style (similar to init view)
+	pipelineContent := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#2563EB")).
+		Width(m.Width-4).
+		Height(contentHeight).
+		Padding(0, 1).
+		Render(content.String())
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		pipelineContent,
+		footer,
+	)
+}
+
+// renderProgressBar renders a progress bar
+func (m Model) renderProgressBar(progress float64, width int) string {
+	if width < 3 {
+		width = 3
+	}
+
+	filled := int(float64(width-2) * progress)
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width-2 {
+		filled = width - 2
+	}
+
+	empty := width - 2 - filled
+
+	bar := "[" + strings.Repeat("█", filled) + strings.Repeat("░", empty) + "]"
+
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#10B981")).
+		Render(bar)
+}
+
 // handleResize adjusts layout for window resizing
 func (m Model) handleResize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.Width = msg.Width
@@ -924,7 +1227,8 @@ func (m Model) handleResize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	if menuHeight < 6 {
 		menuHeight = 6
 	}
-	m.MainMenu.SetSize(msg.Width-4, menuHeight)
+	m.PrimaryMenu.SetSize(msg.Width-4, menuHeight)
+	m.AsicConfigMenu.SetSize(msg.Width-4, menuHeight)
 
 	// Calculate dimensions for chat view
 	// header(1) + footer(1) + input_content(1) + input_border(2) + chat_border(2) + log_border(2) = 9
@@ -1073,7 +1377,7 @@ func (m Model) handleInput(input string) tea.Cmd {
 	}
 	if input == "/menu" {
 		return func() tea.Msg {
-			m.CurrentView = MainMenuView
+			m.CurrentView = PrimaryMenuView
 			return nil
 		}
 	}
@@ -1740,6 +2044,63 @@ func (m Model) runTest() tea.Msg {
 	}()
 }
 
+// runDataPipeline orchestrates the data pipeline workflow: miner -> encoder -> trainer
+func (m Model) runDataPipeline() tea.Cmd {
+	return func() tea.Msg {
+		binDir, err := embedded.GetBinDir()
+		if err != nil {
+			return PipelineCompleteMsg{
+				Success: false,
+				Message: fmt.Sprintf("Failed to get binary directory: %v", err),
+			}
+		}
+
+		stages := []struct {
+			name    string
+			binName string
+			desc    string
+		}{
+			{"data-miner", "dataminer", "Data Miner - Processing documents and PDFs"},
+			{"data-encoder", "data-encoder", "Data Encoder - Tokenization and embeddings"},
+			{"data-trainer", "data-trainer", "Data Trainer - Neural network training"},
+		}
+
+		for i, stage := range stages {
+			binaryPath := filepath.Join(binDir, stage.binName)
+
+			// Check if binary exists
+			if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+				return PipelineCompleteMsg{
+					Success: false,
+					Message: fmt.Sprintf("Binary not found: %s", binaryPath),
+				}
+			}
+
+			// Run stage and capture output
+			cmd := exec.Command(binaryPath)
+			cmd.Dir = binDir
+			output, err := cmd.CombinedOutput()
+			outputStr := strings.TrimSpace(string(output))
+
+			if err != nil {
+				return PipelineCompleteMsg{
+					Success: false,
+					Message: fmt.Sprintf("%s failed: %v\nOutput: %s", stage.name, err, outputStr),
+				}
+			}
+
+			// For intermediate stages, we can't easily send progress updates from within
+			// a single tea.Cmd, so we just continue. The UI will show final completion.
+			_ = i
+		}
+
+		return PipelineCompleteMsg{
+			Success: true,
+			Message: "Data pipeline completed successfully!",
+		}
+	}
+}
+
 // Messages
 type updateResourceDataMsg struct {
 	data string
@@ -1787,19 +2148,32 @@ type ServerCmdMsg struct {
 	Cmd *exec.Cmd
 }
 
+// PipelineProgressMsg is sent to update pipeline progress
+type PipelineProgressMsg struct {
+	Stage    string
+	Progress float64
+	Log      string
+}
+
+// PipelineCompleteMsg is sent when the pipeline finishes
+type PipelineCompleteMsg struct {
+	Success bool
+	Message string
+}
+
 // handleMouse handles mouse events for text selection and scrolling
 func (m Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	switch msg.Type {
 	case tea.MouseRight:
 		// Copy all text on right-click (context-aware)
 		var selected string
-		if m.ServerStarting && !m.ServerReady && m.CurrentView == MainMenuView {
+		if m.ServerStarting && !m.ServerReady && (m.CurrentView == PrimaryMenuView || m.CurrentView == AsicConfigView) {
 			// During initialization, copy all InitContent
 			selected = m.InitContent
 		} else if m.CurrentView == ChatView {
 			// In chat view, copy from ChatView
 			selected = m.ChatView.Value()
-		} else if m.CurrentView == MainMenuView {
+		} else if m.CurrentView == PrimaryMenuView || m.CurrentView == AsicConfigView {
 			// In menu view, copy from LogView
 			selected = m.LogView.Value()
 		}
