@@ -302,8 +302,7 @@ func ensureBuilt(projectRoot string) error {
 func printRunConfiguration(config *Config) {
 	fmt.Println("🔧 Configuration:")
 	fmt.Printf("   Input Directory: %s\n", config.InputDir)
-	fmt.Printf("   Parquet File (Primary): %s\n", config.ParquetFile)
-	fmt.Printf("   JSON Backup: %s\n", config.OutputFile)
+	fmt.Printf("   JSON Output: %s\n", config.OutputFile)
 	fmt.Printf("   Workers: %d\n", config.NumWorkers)
 	fmt.Printf("   Chunk Size: %d words\n", config.ChunkSize)
 	fmt.Printf("   Chunk Overlap: %d words\n", config.ChunkOverlap)

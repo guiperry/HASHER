@@ -141,7 +141,7 @@ func TestEndToEndEncoding(t *testing.T) {
 	file.Close()
 
 	// Set up output file
-	outputFile := filepath.Join(tempDir, "test_output.parquet")
+	outputFile := filepath.Join(tempDir, "test_output.json")
 
 	// Run the encoder
 	config := &Config{
@@ -163,35 +163,22 @@ func TestEndToEndEncoding(t *testing.T) {
 		t.Fatal("output file was not created")
 	}
 
-	// Read and verify Parquet file
-	fr, err := local.NewLocalFileReader(outputFile)
+	// Read and verify JSON file
+	data, err := os.ReadFile(outputFile)
 	if err != nil {
-		t.Fatalf("failed to open parquet file: %v", err)
-	}
-	defer fr.Close()
-
-	pr, err := reader.NewParquetReader(fr, new(schema.TrainingFrame), 2)
-	if err != nil {
-		t.Fatalf("failed to create parquet reader: %v", err)
-	}
-	defer pr.ReadStop()
-
-	numRows := pr.GetNumRows()
-	if numRows == 0 {
-		t.Error("expected rows in parquet file, got 0")
+		t.Fatalf("failed to read JSON file: %v", err)
 	}
 
-	t.Logf("✓ Generated %d training frames", numRows)
+	var frames []schema.TrainingFrame
+	if err := json.Unmarshal(data, &frames); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
 
-	// Read some frames to verify structure
-	maxFrames := numRows
-	if maxFrames > 10 {
-		maxFrames = 10
+	if len(frames) == 0 {
+		t.Error("expected frames in JSON file, got 0")
 	}
-	frames := make([]schema.TrainingFrame, maxFrames)
-	if err := pr.Read(&frames); err != nil {
-		t.Fatalf("failed to read frames: %v", err)
-	}
+
+	t.Logf("✓ Generated %d training frames", len(frames))
 
 	// Verify frame structure with sliding window metadata
 	for i, frame := range frames {

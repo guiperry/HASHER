@@ -12,7 +12,6 @@ type DocumentRecord struct {
 type Config struct {
 	InputDir     string
 	OutputFile   string
-	ParquetFile  string
 	NumWorkers   int
 	ChunkSize    int
 	ChunkOverlap int
@@ -44,9 +43,9 @@ type Config struct {
 	DryRun         bool
 
 	// Environment configuration
-	CPUOverride      int
-	CloudflareLimit  int
-	GPUOverride      bool
-	GPUOptimizations bool
+	CPUOverride        int
+	CloudflareLimit    int
+	GPUOverride        bool
+	GPUOptimizations   bool
 	CloudflareEndpoint string
 }

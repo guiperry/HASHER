@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,13 @@ import (
 	"hasher/internal/cli/embedded"
 	"hasher/internal/cli/ui"
 )
+
+// PipelineState holds the current pipeline command state (shared between UI and signal handler)
+var pipelineState struct {
+	Cmd     *exec.Cmd
+	Running bool
+	Mu      sync.Mutex
+}
 
 // CLI configuration flags
 var (
@@ -46,7 +54,7 @@ func main() {
 	model.CheckExistingHasherHost()
 
 	// Start the Bubble Tea UI with alternate screen and mouse support
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion(), tea.WithInputTTY())
 
 	// Handle server shutdown with ASIC cleanup
 	go func() {
@@ -57,17 +65,30 @@ func main() {
 		if model.ServerCmd != nil && model.ServerCmd.Process != nil {
 			shutdownHasherHost(model.ServerCmd, true, 8080)
 		}
+		// Shutdown pipeline process if running
+		pipelineState.Mu.Lock()
+		shutdownPipelineProcess(pipelineState.Cmd)
+		pipelineState.Running = false
+		pipelineState.Mu.Unlock()
 		os.Exit(0)
 	}()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		cleanupASICDevice(model.Deployer)
+		pipelineState.Mu.Lock()
+		shutdownPipelineProcess(pipelineState.Cmd)
+		pipelineState.Running = false
+		pipelineState.Mu.Unlock()
 		os.Exit(1)
 	}
 
 	// Ensure cleanup when exiting normally
 	cleanupASICDevice(model.Deployer)
+	pipelineState.Mu.Lock()
+	shutdownPipelineProcess(pipelineState.Cmd)
+	pipelineState.Running = false
+	pipelineState.Mu.Unlock()
 }
 
 // initEmbeddedBinaries extracts embedded binaries to app data directory
@@ -220,5 +241,36 @@ func shutdownHasherHost(cmd *exec.Cmd, started bool, port int) {
 			resp.Body.Close()
 			fmt.Println("Shutdown request sent to pre-existing hasher-host.")
 		}
+	}
+}
+
+// shutdownPipelineProcess gracefully shuts down a running pipeline stage process
+func shutdownPipelineProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	fmt.Println("Shutting down pipeline process...")
+
+	// Try graceful SIGTERM first
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		// If SIGTERM fails, try SIGKILL
+		fmt.Println("Pipeline process SIGTERM failed, force killing...")
+		cmd.Process.Kill()
+		return
+	}
+
+	// Wait for process to terminate with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case <-done:
+		fmt.Println("Pipeline process shut down successfully.")
+	case <-time.After(5 * time.Second):
+		fmt.Println("Pipeline process shutdown timeout, force killing...")
+		cmd.Process.Kill()
 	}
 }

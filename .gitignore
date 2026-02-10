@@ -98,3 +98,4 @@ pipeline/3_DATA_TRAINER/trainer
 hasher-host
 /pipeline/3_DATA_TRAINER/data
 /pipeline/3_DATA_TRAINER/data
+cli

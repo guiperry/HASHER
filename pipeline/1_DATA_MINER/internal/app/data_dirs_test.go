@@ -13,12 +13,12 @@ func TestGetAppDataDir(t *testing.T) {
 		t.Fatalf("Failed to get app data directory: %v", err)
 	}
 
-	// Check that the directory was created
+	// Check that directory was created
 	if _, err := os.Stat(appDir); os.IsNotExist(err) {
 		t.Errorf("App data directory should exist: %s", appDir)
 	}
 
-	// Check that the path contains 'hasher'
+	// Check that path contains 'hasher'
 	if !containsSubstring(appDir, "hasher") {
 		t.Errorf("App data directory should contain 'hasher': %s", appDir)
 	}
@@ -37,7 +37,7 @@ func TestSetupDataDirectories(t *testing.T) {
 	}
 
 	// Check that all expected directories are created
-	expectedDirs := []string{"checkpoints", "papers", "json", "documents", "temp", "backup"}
+	expectedDirs := []string{"checkpoints", "papers", "json", "documents", "temp"}
 	for _, dirName := range expectedDirs {
 		dirPath, exists := dirs[dirName]
 		if !exists {
@@ -45,26 +45,26 @@ func TestSetupDataDirectories(t *testing.T) {
 			continue
 		}
 
-		// Check that the directory exists
+		// Check that directory exists
 		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 			t.Errorf("Directory should exist: %s", dirPath)
 		}
 
-		// Special check: json should be under backup
-		if dirName == "json" && !containsSubstring(dirPath, "backup") {
-			t.Errorf("JSON directory should be under backup: %s", dirPath)
+		// Special check: json should be directly under data directory
+		if dirName == "json" && !containsSubstring(dirPath, "json") {
+			t.Errorf("JSON directory should be directly under data directory: %s", dirPath)
 		}
 	}
 
-	// Verify json is in backup subdirectory
+	// Verify json is directly in data subdirectory
 	jsonPath := dirs["json"]
-	expectedJSONPath := filepath.Join(appDir, "backup", "json")
+	expectedJSONPath := filepath.Join(appDir, "json")
 	if jsonPath != expectedJSONPath {
 		t.Errorf("JSON path mismatch: expected %s, got %s", expectedJSONPath, jsonPath)
 	}
 }
 
-func TestSetupDataDirectoriesJSONBackupLocation(t *testing.T) {
+func TestSetupDataDirectoriesJSONLocation(t *testing.T) {
 	tempDir := t.TempDir()
 	appDir := filepath.Join(tempDir, "testapp")
 
@@ -73,9 +73,9 @@ func TestSetupDataDirectoriesJSONBackupLocation(t *testing.T) {
 		t.Fatalf("Failed to setup data directories: %v", err)
 	}
 
-	// Verify the json directory is in backup/json
+	// Verify json directory is directly in data/json
 	jsonDir := dirs["json"]
-	expectedJSONDir := filepath.Join(appDir, "backup", "json")
+	expectedJSONDir := filepath.Join(appDir, "json")
 
 	if jsonDir != expectedJSONDir {
 		t.Errorf("JSON directory should be at %s, got %s", expectedJSONDir, jsonDir)
@@ -149,7 +149,7 @@ func TestSetupDataDirectoriesCreatesAllDirs(t *testing.T) {
 	tempDir := t.TempDir()
 	appDir := filepath.Join(tempDir, "freshapp")
 
-	// Ensure the directory doesn't exist yet
+	// Ensure directory doesn't exist yet
 	os.RemoveAll(appDir)
 
 	dirs, err := SetupDataDirectories(appDir)

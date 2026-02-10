@@ -45,6 +45,9 @@ PATTERNS=(
     "device-probe"
     "device-monitor"
     "asic-monitor"
+    "dataminer"
+    "data-encoder"
+    "data-trainer"
 )
 
 # Timeout for graceful kill (seconds)

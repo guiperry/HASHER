@@ -22,11 +22,6 @@ import (
 	"data-encoder/pkg/schema"
 	"data-encoder/pkg/sliding"
 	"data-encoder/pkg/tokenizer"
-
-	"github.com/xitongsys/parquet-go-source/local"
-	"github.com/xitongsys/parquet-go/parquet"
-	"github.com/xitongsys/parquet-go/reader"
-	"github.com/xitongsys/parquet-go/writer"
 )
 
 // Config holds the application configuration
@@ -34,7 +29,9 @@ type Config struct {
 	InputFile  string
 	OutputFile string
 	MapperSeed int64
-	NumWorkers int
+
+	// Worker configuration
+	NumWorkers int // Default: 4 workers
 
 	// NEW: Sliding window configuration
 	WindowSize   int // Default: 128 tokens
@@ -75,19 +72,18 @@ func getAppDataDir() string {
 func parseFlags() *Config {
 	config := &Config{}
 
-	// Default paths - prioritize parquet with JSON fallback
+	// Default paths - JSON only
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("Failed to get home directory: %v", err)
 	}
-	defaultParquetInput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.parquet")
-	defaultJSONInput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
-	defaultOutput := filepath.Join(getAppDataDir(), "training_frames.parquet")
+	defaultJSONInput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "json", "ai_knowledge_base.json")
+	defaultOutput := filepath.Join(homeDir, ".local", "share", "hasher", "data", "frames", "training_frames.json")
 
-	flag.StringVar(&config.InputFile, "input", defaultParquetInput, "Input Parquet/JSON file path")
-	flag.StringVar(&config.OutputFile, "output", defaultOutput, "Output Parquet file path")
+	flag.StringVar(&config.InputFile, "input", defaultJSONInput, "Input JSON file path")
+	flag.StringVar(&config.OutputFile, "output", defaultOutput, "Output JSON file path")
 	flag.Int64Var(&config.MapperSeed, "seed", 1337, "Random seed for mapper (for reproducibility)")
-	flag.IntVar(&config.NumWorkers, "workers", 4, "Number of concurrent workers for Parquet writing")
+	flag.IntVar(&config.NumWorkers, "workers", 4, "Number of worker goroutines")
 
 	// NEW: Sliding window configuration
 	flag.IntVar(&config.WindowSize, "window-size", 128, "Sliding window size in tokens")
@@ -103,9 +99,10 @@ func parseFlags() *Config {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nDefault input files (checked in order):\n")
-		fmt.Fprintf(os.Stderr, "  1. %s (Parquet - primary)\n", defaultParquetInput)
-		fmt.Fprintf(os.Stderr, "  2. %s (JSON - backup)\n", defaultJSONInput)
+		fmt.Fprintf(os.Stderr, "\nDefault input file:\n")
+		fmt.Fprintf(os.Stderr, "  %s (JSON)\n", defaultJSONInput)
+		fmt.Fprintf(os.Stderr, "\nDefault output file:\n")
+		fmt.Fprintf(os.Stderr, "  %s (JSON)\n", defaultOutput)
 	}
 
 	flag.Parse()
@@ -113,19 +110,16 @@ func parseFlags() *Config {
 	return config
 }
 
+// replaceFileExtension replaces the file extension in a path
+func replaceFileExtension(path, newExt string) string {
+	ext := filepath.Ext(path)
+	return strings.TrimSuffix(path, ext) + newExt
+}
+
 func validateConfig(config *Config) error {
-	// Calculate default JSON backup path
-	homeDir, _ := os.UserHomeDir()
-	defaultJSONPath := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
-
-	// Detect input file with priority: parquet -> json backup -> legacy json
-	detectedInput, inputType, err := detectInputFile(config.InputFile, defaultJSONPath)
-	if err != nil {
-		return fmt.Errorf("no valid input file found: %w", err)
-	}
-
-	config.InputFile = detectedInput
-	log.Printf("📁 Detected input file type: %s (%s)", filepath.Base(detectedInput), inputType)
+	// Detect file type
+	fileType := detectFileType(config.InputFile)
+	log.Printf("📁 Input file type: %s (%s)", filepath.Base(config.InputFile), fileType)
 
 	// Check if input file exists
 	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
@@ -149,120 +143,85 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// detectInputFile determines the appropriate input file based on priority:
-// 1. Parquet file (primary)
-// 2. JSON backup file (fallback)
-// 3. Legacy JSON file (final fallback)
-func detectInputFile(defaultParquetPath, defaultJSONPath string) (string, string, error) {
-	// Priority 1: Check if default parquet file exists
-	if _, err := os.Stat(defaultParquetPath); err == nil {
-		return defaultParquetPath, "parquet", nil
-	}
-
-	// Priority 2: Check if JSON backup file exists
-	if _, err := os.Stat(defaultJSONPath); err == nil {
-		return defaultJSONPath, "json", nil
-	}
-
-	// Priority 3: Check for legacy JSON location
-	homeDir, _ := os.UserHomeDir()
-	legacyJSONPath := filepath.Join(homeDir, ".local", "share", "hasher", "data", "ai_knowledge_base.json")
-	if _, err := os.Stat(legacyJSONPath); err == nil {
-		return legacyJSONPath, "json (legacy)", nil
-	}
-
-	return "", "", fmt.Errorf("no input file found in any location")
-}
-
-// detectFileType determines if a file is parquet or JSON based on extension and magic bytes
+// detectFileType determines if a file is JSON, JSONL, or Arrow based on extension
 func detectFileType(filePath string) string {
-	// Check file extension first
+	// Check file extension
 	ext := strings.ToLower(filepath.Ext(filePath))
-	if ext == ".parquet" {
-		return "parquet"
+	if ext == ".arrow" {
+		return "arrow"
 	}
 	if ext == ".json" || ext == ".jsonl" {
 		return "json"
 	}
 
-	// For files with no extension or unknown extension, check magic bytes
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "unknown"
-	}
-	defer file.Close()
-
-	// Read first 4 bytes to check for parquet magic number "PAR1"
-	header := make([]byte, 4)
-	_, err = file.Read(header)
-	if err != nil {
-		return "unknown"
-	}
-
-	// Parquet files start with "PAR1" magic bytes
-	if string(header) == "PAR1" {
-		return "parquet"
-	}
-
-	return "json" // Default to JSON for text-based files
+	return "json" // Default to JSON
 }
 
-// readParquetFile reads a parquet file and returns DocumentRecord chunks
-func readParquetFile(filePath string) ([]schema.DocumentRecord, error) {
-	fr, err := local.NewLocalFileReader(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open parquet file: %w", err)
-	}
-	defer fr.Close()
-
-	pr, err := reader.NewParquetReader(fr, new(schema.DocumentRecord), 2)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parquet reader: %w", err)
-	}
-	defer pr.ReadStop()
-
-	numRows := pr.GetNumRows()
-	if numRows == 0 {
-		return nil, fmt.Errorf("parquet file contains no rows")
+// detectInputFile determines the appropriate input file based on priority:
+// 1. JSON file (primary)
+// 2. Legacy JSON file (fallback)
+// detectInputFile determines the appropriate input file based on priority:
+// 1. JSON file (primary)
+// 2. Legacy JSON file (fallback)
+func detectInputFile(defaultJSONPath, legacyJSONPath string) (string, string, error) {
+	// Priority 1: Check if default JSON file exists
+	if _, err := os.Stat(defaultJSONPath); err == nil {
+		return defaultJSONPath, "json", nil
 	}
 
-	log.Printf("📖 Reading %d DocumentRecord chunks from parquet file...", numRows)
-
-	// Read all records into memory (could be optimized for streaming)
-	records := make([]schema.DocumentRecord, numRows)
-	err = pr.Read(&records)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read parquet records: %w", err)
+	// Priority 2: Check for legacy JSON location
+	if _, err := os.Stat(legacyJSONPath); err == nil {
+		return legacyJSONPath, "json (legacy)", nil
 	}
 
-	log.Printf("✅ Successfully read %d DocumentRecord chunks", len(records))
-	return records, nil
+	return "", "", fmt.Errorf("no JSON input file found in any location")
 }
 
 // performVarianceAnalysis samples documents to identify high-variance BGE dimensions
 func performVarianceAnalysis(inputFile string) ([]int, error) {
 	va := analyzer.NewVarianceAnalyzer()
-	fileType := detectFileType(inputFile)
-
-	// Sample up to 1000 records for variance analysis
 	maxSamples := 1000
 	sampleCount := 0
 
-	if fileType == "parquet" {
-		// Read parquet records
-		records, err := readParquetFile(inputFile)
-		if err != nil {
-			log.Printf("⚠️  Failed to read parquet for variance analysis: %v", err)
-		} else {
-			for _, record := range records {
-				if sampleCount >= maxSamples {
-					break
-				}
-				// Sample the embedding for variance analysis
-				if len(record.Embedding) > 0 {
-					if err := va.Sample(record.Embedding); err == nil {
-						sampleCount++
-					}
+	// Read JSON file
+	content, err := os.ReadFile(inputFile)
+	if err != nil {
+		log.Printf("⚠️  Failed to read JSON for variance analysis: %v", err)
+		return getDefaultVarianceIndices(), nil
+	}
+
+	contentStr := string(content)
+	trimmed := strings.TrimSpace(contentStr)
+	isJSONArray := strings.HasPrefix(trimmed, "[")
+
+	if isJSONArray {
+		// Process JSON array
+		var records []schema.MinedRecord
+		if err := json.Unmarshal([]byte(contentStr), &records); err != nil {
+			log.Printf("⚠️  Failed to parse JSON for variance analysis: %v", err)
+			return getDefaultVarianceIndices(), nil
+		}
+
+		for _, record := range records {
+			if sampleCount >= maxSamples {
+				break
+			}
+			if sampleRecord(&record, va) {
+				sampleCount++
+			}
+		}
+	} else {
+		// Process JSONL format
+		scanner := bufio.NewScanner(strings.NewReader(contentStr))
+		for scanner.Scan() && sampleCount < maxSamples {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var record schema.MinedRecord
+			if err := json.Unmarshal([]byte(line), &record); err == nil {
+				if sampleRecord(&record, va) {
+					sampleCount++
 				}
 			}
 		}
@@ -271,13 +230,12 @@ func performVarianceAnalysis(inputFile string) ([]int, error) {
 	// Calculate variance and get indices
 	if err := va.Calculate(); err != nil {
 		log.Printf("⚠️  Variance calculation failed: %v, using defaults", err)
-		return []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}, nil
+		return getDefaultVarianceIndices(), nil
 	}
 
 	if sampleCount > 0 {
 		log.Printf("📊 Variance analysis: sampled %d documents", sampleCount)
-		stats, _ := va.GetStats()
-		if stats != nil {
+		if stats, _ := va.GetStats(); stats != nil {
 			log.Printf("📊 Top variance: %.6f, Mean variance: %.6f", stats.TopVariance, stats.MeanVariance)
 		}
 	} else {
@@ -285,6 +243,29 @@ func performVarianceAnalysis(inputFile string) ([]int, error) {
 	}
 
 	return va.GetSignalIndices(), nil
+}
+
+// sampleRecord creates a variance sample from a record
+func sampleRecord(record *schema.MinedRecord, va *analyzer.VarianceAnalyzer) bool {
+	if len(record.Content) == 0 {
+		return false
+	}
+
+	tokens := strings.Fields(record.Content)
+	embedding := make([]float32, 1024) // BGE dimension
+	for i, token := range tokens {
+		if i >= len(embedding) {
+			break
+		}
+		embedding[i] = float32(len(token)%100) / 100.0 // Simple variance proxy
+	}
+
+	return va.Sample(embedding) == nil
+}
+
+// getDefaultVarianceIndices returns default variance indices
+func getDefaultVarianceIndices() []int {
+	return []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
 }
 
 func runEncoder(config *Config) error {
@@ -304,8 +285,8 @@ func runEncoder(config *Config) error {
 		cancel()
 	}()
 
-	log.Printf("🔧 Initializing Data Encoder (seed=%d, workers=%d, window=%d, stride=%d, batch=%d, quota=%d)...",
-		config.MapperSeed, config.NumWorkers, config.WindowSize, config.WindowStride, config.BatchSize, config.QuotaLimit)
+	log.Printf("🔧 Initializing Data Encoder (seed=%d, window=%d, stride=%d, batch=%d, quota=%d)...",
+		config.MapperSeed, config.WindowSize, config.WindowStride, config.BatchSize, config.QuotaLimit)
 
 	// 0. Initialize Checkpoint Manager (for resume capability and quota tracking)
 	var cpManager *checkpoint.Manager
@@ -365,67 +346,35 @@ func runEncoder(config *Config) error {
 
 	log.Printf("💾 Output will be saved to: %s", config.OutputFile)
 
-	// 2. Setup Parquet Writer
-	fw, err := local.NewLocalFileWriter(config.OutputFile)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-
-	pw, err := writer.NewParquetWriter(fw, new(schema.TrainingFrame), int64(config.NumWorkers))
-	if err != nil {
-		fw.Close()
-		return fmt.Errorf("failed to create Parquet writer: %w", err)
-	}
-	pw.CompressionType = parquet.CompressionCodec_SNAPPY
+	// Create JSON array to collect training frames
+	var frames []schema.TrainingFrame
+	var mu sync.Mutex
 
 	// Use WaitGroup to coordinate processing and cleanup
 	var wg sync.WaitGroup
 	var frameCount int64
 	var processErr error
-	var mu sync.Mutex
 
 	// Start processing in a goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
-		// 3. Detect file type and read appropriate format
+		// Process according to file type
 		fileType := detectFileType(config.InputFile)
-		log.Printf("📖 Detected input file type: %s", fileType)
-
-		if fileType == "parquet" {
-			// Try to read as parquet first
-			var records []schema.DocumentRecord
-			records, err = readParquetFile(config.InputFile)
-			if err != nil {
-				// Parquet read failed, try fallback to JSON
-				log.Printf("⚠️  Parquet read failed (%v), attempting JSON fallback...", err)
-				frameCount, err = processJSONFallback(config.InputFile, mp, varianceMapper, tk, ew, pw, config, cpManager)
-				if err != nil {
-					mu.Lock()
-					processErr = fmt.Errorf("both parquet and JSON processing failed: %w", err)
-					mu.Unlock()
-					return
-				}
-			} else {
-				// Successfully read parquet, convert to MinedRecord format and process
-				frameCount, err = processDocumentRecords(records, mp, varianceMapper, tk, ew, pw, config, cpManager)
-				if err != nil {
-					mu.Lock()
-					processErr = fmt.Errorf("failed to process parquet records: %w", err)
-					mu.Unlock()
-					return
-				}
-			}
+		if fileType == "arrow" {
+			// Process Arrow IPC stream
+			frameCount, err = processArrowFile(config.InputFile, mp, varianceMapper, tk, ew, &frames, config, cpManager)
 		} else {
-			// Process as JSON format (array or JSONL)
-			frameCount, err = processJSONFile(config.InputFile, mp, varianceMapper, tk, ew, pw, config, cpManager)
-			if err != nil {
-				mu.Lock()
-				processErr = fmt.Errorf("failed to process JSON file: %w", err)
-				mu.Unlock()
-				return
-			}
+			// Process JSON format (array or JSONL)
+			frameCount, err = processJSONFile(config.InputFile, mp, varianceMapper, tk, ew, &frames, config, cpManager)
+		}
+
+		if err != nil {
+			mu.Lock()
+			processErr = fmt.Errorf("failed to process file: %w", err)
+			mu.Unlock()
+			return
 		}
 	}()
 
@@ -461,19 +410,20 @@ func runEncoder(config *Config) error {
 		}
 	}
 
-	// Explicitly flush and close the parquet writer
-	log.Printf("💾 Flushing parquet writer...")
-	if err := pw.WriteStop(); err != nil {
-		fw.Close()
-		return fmt.Errorf("failed to flush parquet writer: %w", err)
+	// Write JSON output
+	log.Printf("💾 Writing JSON output...")
+	if err := writeJSONOutput(config.OutputFile, frames); err != nil {
+		return fmt.Errorf("failed to write JSON output: %w", err)
 	}
-	log.Printf("💾 Parquet writer flushed successfully")
+	log.Printf("💾 JSON output written successfully")
 
-	// Close the file writer
-	if err := fw.Close(); err != nil {
-		return fmt.Errorf("failed to close file writer: %w", err)
+	// Write Arrow IPC stream output
+	arrowPath := replaceFileExtension(config.OutputFile, ".arrow")
+	log.Printf("💾 Writing Arrow IPC stream output...")
+	if err := schema.WriteTrainingFramesToArrowIPC(arrowPath, frames); err != nil {
+		return fmt.Errorf("failed to write Arrow IPC stream output: %w", err)
 	}
-	log.Printf("💾 File writer closed")
+	log.Printf("💾 Arrow IPC stream output written successfully: %s", arrowPath)
 
 	// Check for processing errors
 	mu.Lock()
@@ -494,8 +444,8 @@ func runEncoder(config *Config) error {
 	return nil
 }
 
-// processJSONFallback handles JSON processing when parquet fails
-func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+// processJSONFallback handles JSON processing
+func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	log.Printf("🔄 Attempting JSON processing from: %s", filePath)
 
 	content, err := os.ReadFile(filePath)
@@ -523,15 +473,15 @@ func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.Varianc
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, pw, config, cpManager)
+		return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config, cpManager)
+		return processJSONLRecords(contentStr, mp, vm, tk, ew, frames, config, cpManager)
 	}
 }
 
 // processJSONFile processes JSON files with proper error handling
-func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read input file: %w", err)
@@ -557,15 +507,15 @@ func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMap
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, pw, config, cpManager)
+		return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, pw, config, cpManager)
+		return processJSONLRecords(contentStr, mp, vm, tk, ew, frames, config, cpManager)
 	}
 }
 
-// processDocumentRecords processes DocumentRecord chunks from parquet file
-func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+// processDocumentRecords processes DocumentRecord chunks
+func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
 	var recordCount int64
 	log.Printf("[BATCH] Starting to process %d DocumentRecords...", len(records))
@@ -591,7 +541,7 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 			Content:  record.Content,
 		}
 
-		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process DocumentRecord %d: %w", i, err)
 		}
 
@@ -607,14 +557,6 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 			}
 		}
 
-		// Flush parquet writer every 50 frames to ensure data is written to disk
-		if frameCount%50 == 0 {
-			log.Printf("[BATCH] Flushing parquet writer (frame count: %d)...", frameCount)
-			if err := pw.Flush(true); err != nil {
-				log.Printf("⚠️  Failed to flush parquet writer: %v", err)
-			}
-		}
-
 		// Progress logging every 10 records (more frequent)
 		if i%10 == 0 {
 			log.Printf("📊 Processed %d/%d DocumentRecords, generated %d frames...", i, len(records), frameCount)
@@ -626,7 +568,7 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 }
 
 // processMinedRecords processes MinedRecord chunks from JSON array
-func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
 	var processedCount int64
 
@@ -640,7 +582,7 @@ func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *
 			continue
 		}
 
-		if err := processSingleRecordWithSlidingWindow(record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process record %d: %w", i, err)
 		}
 
@@ -666,7 +608,7 @@ func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *
 }
 
 // processJSONLRecords processes JSONL format records
-func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var recordCount, frameCount, fixedCount int64
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var updatedLines []string
@@ -710,7 +652,7 @@ func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.Variance
 		}
 
 		// Process the record with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process record %d: %w", recordCount, err)
 		}
 
@@ -761,7 +703,7 @@ func fixJSONContent(content string) (string, bool) {
 	return fixed, original != fixed
 }
 
-func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) error {
+func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
 	log.Printf("[PROCESS] Starting record %d from %s (content length: %d chars)", record.ChunkID, record.FileName, len(record.Content))
 
 	// Check quota availability before processing
@@ -834,7 +776,7 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 		log.Printf("[PROCESS]   Received %d embeddings (dimension: %d)", len(batchEmbeddings), len(batchEmbeddings[0]))
 
 		// 6. Process each window in the batch
-		log.Printf("[PROCESS] Step 6/6: Writing %d frames to parquet...", len(batch))
+		log.Printf("[PROCESS] Step 6/6: Writing %d frames to JSON array...", len(batch))
 		for i, window := range batch {
 			// Map embedding to ASIC slots
 			asicSlots := mp.MapToSlots(batchEmbeddings[i])
@@ -851,10 +793,7 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 			}
 			frame.SetAsicSlots(asicSlots)
 
-			if err := pw.Write(frame); err != nil {
-				log.Printf("[PROCESS] ❌ Parquet write error: %v", err)
-				return fmt.Errorf("failed to write frame to parquet: %w", err)
-			}
+			*frames = append(*frames, frame)
 			*frameCount++
 		}
 		log.Printf("[PROCESS]   Wrote %d frames (total: %d)", len(batch), *frameCount)
@@ -870,7 +809,7 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 	return nil
 }
 
-func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, pw *writer.ParquetWriter, config *Config, cpManager *checkpoint.Manager) error {
+func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
 	decoder := json.NewDecoder(jsonFile)
 	decoder.DisallowUnknownFields()
 
@@ -894,7 +833,7 @@ func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.Vari
 		recordCount++
 
 		// Process with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, pw, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
 			return fmt.Errorf("failed to process record %d: %w", recordCount, err)
 		}
 
@@ -933,6 +872,38 @@ func fixAndRetryRecord(decoder *json.Decoder, record *schema.MinedRecord, config
 	}
 
 	*fixedCount++
+	return nil
+}
+
+// processArrowFile processes Arrow IPC stream files
+func processArrowFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+	log.Printf("🔄 Attempting Arrow IPC stream processing from: %s", filePath)
+
+	// Read records from Arrow IPC stream
+	records, err := schema.ReadMinedRecordsFromArrowIPC(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read Arrow IPC stream: %w", err)
+	}
+
+	log.Printf("📋 Detected Arrow IPC format with %d records", len(records))
+	return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
+}
+
+func writeJSONOutput(filePath string, frames []schema.TrainingFrame) error {
+	// Write to JSON
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+
+	if err := encoder.Encode(frames); err != nil {
+		return fmt.Errorf("failed to encode JSON: %w", err)
+	}
+
 	return nil
 }
 

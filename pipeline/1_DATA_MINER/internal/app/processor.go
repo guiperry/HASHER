@@ -19,9 +19,6 @@ import (
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
-	"github.com/xitongsys/parquet-go-source/local"
-	"github.com/xitongsys/parquet-go/parquet"
-	"github.com/xitongsys/parquet-go/writer"
 )
 
 // ScanForPDFs scans the input directory for PDF files that haven't been processed
@@ -152,15 +149,14 @@ func ProcessDocuments(config *Config, checkpointer *checkpoint.Checkpointer) err
 	}()
 
 	// Collect results and write to output
-	if err := writeOutput(config.ParquetFile, config.OutputFile, results); err != nil {
+	if err := writeOutput(config.OutputFile, results); err != nil {
 		return fmt.Errorf("failed to write output: %w", err)
 	}
 
 	// Wait for progress bar to finish
 	p.Wait()
 	fmt.Printf("Pipeline complete! Processed %d PDF files.\n", len(files))
-	fmt.Printf("  📊 Parquet (primary): %s\n", config.ParquetFile)
-	fmt.Printf("  📄 JSON (backup): %s\n", config.OutputFile)
+	fmt.Printf("  📄 JSON Output: %s\n", config.OutputFile)
 
 	return nil
 }
@@ -336,56 +332,76 @@ func getBatchEmbeddings(provider *embedder.HybridEmbeddingProvider, texts []stri
 	return provider.GetBatchEmbeddings(texts)
 }
 
-// writeOutput writes the document records to both Parquet (primary) and JSON (backup) files
-func writeOutput(parquetPath string, jsonPath string, results <-chan DocumentRecord) error {
-	// Write to Parquet first (primary format)
-	if err := writeParquetOutput(parquetPath, results); err != nil {
-		return fmt.Errorf("failed to write parquet output: %w", err)
+// writeOutput writes the document records to JSON file and Arrow IPC stream
+func writeOutput(jsonPath string, results <-chan DocumentRecord) error {
+	// Collect all results first
+	var records []DocumentRecord
+	for record := range results {
+		records = append(records, record)
 	}
 
-	// Then write to JSON as backup
-	if err := writeJSONOutput(jsonPath, results); err != nil {
-		return fmt.Errorf("failed to write json backup: %w", err)
+	// Write to JSON
+	if err := writeJSONOutputFromSlice(jsonPath, records); err != nil {
+		return fmt.Errorf("failed to write json output: %w", err)
+	}
+
+	// Write to Arrow IPC stream
+	arrowPath := replaceFileExtension(jsonPath, ".arrow")
+	if err := WriteDocumentRecordsToArrowIPC(arrowPath, records); err != nil {
+		return fmt.Errorf("failed to write Arrow IPC output: %w", err)
 	}
 
 	return nil
 }
 
-// writeParquetOutput writes document records to a Parquet file with SNAPPY compression
-func writeParquetOutput(path string, results <-chan DocumentRecord) error {
+// writeJSONOutputFromSlice writes document records from a slice to a JSON file
+func writeJSONOutputFromSlice(path string, records []DocumentRecord) error {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Create parquet file writer
-	fw, err := local.NewLocalFileWriter(path)
+	file, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("failed to create parquet file writer: %w", err)
+		return fmt.Errorf("failed to create json file: %w", err)
 	}
-	defer fw.Close()
+	defer file.Close()
 
-	// Create parquet writer with SNAPPY compression
-	pw, err := writer.NewParquetWriter(fw, new(DocumentRecord), 4)
-	if err != nil {
-		return fmt.Errorf("failed to create parquet writer: %w", err)
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+
+	first := true
+	if _, err := file.WriteString("[\n"); err != nil {
+		return err
 	}
-	defer pw.WriteStop()
 
-	// Set compression type to SNAPPY
-	pw.CompressionType = parquet.CompressionCodec_SNAPPY
-
-	// Write records
-	for record := range results {
-		if err := pw.Write(record); err != nil {
-			return fmt.Errorf("failed to write record to parquet: %w", err)
+	for _, record := range records {
+		if !first {
+			if _, err := file.WriteString(",\n"); err != nil {
+				return err
+			}
 		}
+		first = false
+
+		if err := encoder.Encode(record); err != nil {
+			return err
+		}
+	}
+
+	if _, err := file.WriteString("\n]"); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// writeJSONOutput writes document records to a JSON file as backup
+// replaceFileExtension replaces the file extension in a path
+func replaceFileExtension(path, newExt string) string {
+	ext := filepath.Ext(path)
+	return strings.TrimSuffix(path, ext) + newExt
+}
+
+// writeJSONOutput writes document records to a JSON file
 func writeJSONOutput(path string, results <-chan DocumentRecord) error {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -973,26 +989,8 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 		files = files[:maxPapers]
 	}
 
-	// Create parquet file (primary output)
-	fmt.Printf("📝 Creating parquet file: %s\n", config.ParquetFile)
-	if err := os.MkdirAll(filepath.Dir(config.ParquetFile), 0755); err != nil {
-		return 0, 0, fmt.Errorf("failed to create parquet directory: %w", err)
-	}
-	parquetFile, err := local.NewLocalFileWriter(config.ParquetFile)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to create parquet file: %w", err)
-	}
-	defer parquetFile.Close()
-
-	parquetWriter, err := writer.NewParquetWriter(parquetFile, new(DocumentRecord), 4)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to create parquet writer: %w", err)
-	}
-	defer parquetWriter.WriteStop()
-	parquetWriter.CompressionType = parquet.CompressionCodec_SNAPPY
-
-	// Create JSON backup file
-	fmt.Printf("📝 Creating JSON backup: %s\n", config.OutputFile)
+	// Create JSON output file
+	fmt.Printf("📝 Creating JSON output: %s\n", config.OutputFile)
 	if err := os.MkdirAll(filepath.Dir(config.OutputFile), 0755); err != nil {
 		return 0, 0, fmt.Errorf("failed to create json directory: %w", err)
 	}
@@ -1107,20 +1105,6 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 				continue // Skip chunks that timeout
 			}
 
-			// Create DocumentRecord for both parquet and JSON
-			record := DocumentRecord{
-				FileName:  file,
-				ChunkID:   int32(j),
-				Content:   chunk,
-				Embedding: embedding,
-			}
-
-			// Write to Parquet (primary)
-			if err := parquetWriter.Write(record); err != nil {
-				fmt.Printf("⚠️  Failed to write parquet record: %v\n", err)
-				continue
-			}
-
 			// Write record to JSON backup
 			if !firstRecord {
 				if _, err := jsonFile.WriteString(",\n"); err != nil {
@@ -1184,8 +1168,7 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 	}
 
 	fmt.Printf("🎉 Neural processing phase completed: %d papers, %d embeddings\n", papersProcessed, totalEmbeddingsGenerated)
-	fmt.Printf("  📊 Parquet (primary): %s\n", config.ParquetFile)
-	fmt.Printf("  📄 JSON (backup): %s\n", config.OutputFile)
+	fmt.Printf("  📄 JSON Output: %s\n", config.OutputFile)
 	return papersProcessed, totalEmbeddingsGenerated, nil
 }
 

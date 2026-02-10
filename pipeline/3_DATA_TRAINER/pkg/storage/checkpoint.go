@@ -103,12 +103,6 @@ func (cm *CheckpointManager) saveToDiskUnlocked() error {
 	return nil
 }
 
-func (cm *CheckpointManager) maybeAutoSave() {
-	if time.Since(cm.lastSave) >= cm.autoSaveInterval {
-		cm.saveToDiskUnlocked()
-	}
-}
-
 func (cm *CheckpointManager) SaveCheckpoint(entry training.CheckpointEntry) error {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
@@ -349,7 +343,7 @@ func (cm *CheckpointManager) VerifyIntegrity() error {
 				return fmt.Errorf("invalid checkpoint data for key %x: %w", []byte(key), err)
 			}
 
-			if checkpoint.SeedHash == nil || len(checkpoint.SeedHash) == 0 {
+			if len(checkpoint.SeedHash) == 0 {
 				return fmt.Errorf("invalid seed hash for token %d", checkpoint.TokenID)
 			}
 		}

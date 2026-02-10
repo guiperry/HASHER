@@ -6,28 +6,23 @@ import (
 	"testing"
 )
 
-func TestConfigParquetFile(t *testing.T) {
-	// Test that config includes ParquetFile field
+func TestConfigJSONOutput(t *testing.T) {
+	// Test that config includes JSON output field
 	config := &Config{
-		InputDir:    "/input",
-		ParquetFile: "/output/data.parquet",
-		OutputFile:  "/backup/data.json",
+		InputDir:   "/input",
+		OutputFile: "/data/ai_knowledge_base.json",
 	}
 
 	if config.InputDir != "/input" {
 		t.Errorf("InputDir mismatch: expected /input, got %s", config.InputDir)
 	}
 
-	if config.ParquetFile == "" {
-		t.Error("Config should have ParquetFile field")
-	}
-
 	if config.OutputFile == "" {
-		t.Error("Config should have OutputFile field for backup")
+		t.Error("Config should have OutputFile field")
 	}
 
-	// Verify parquet is the primary output
-	if !strings.HasSuffix(config.ParquetFile, ".parquet") {
+	// Verify JSON is the primary output
+	if !strings.HasSuffix(config.OutputFile, ".json") {
 		t.Error("ParquetFile should have .parquet extension")
 	}
 
@@ -51,7 +46,6 @@ func TestConfigDefaultPaths(t *testing.T) {
 
 	config := &Config{
 		InputDir:     dirs["documents"],
-		ParquetFile:  filepath.Join(appDataDir, "ai_knowledge_base.parquet"),
 		OutputFile:   filepath.Join(dirs["json"], "ai_knowledge_base.json"),
 		NumWorkers:   4,
 		ChunkSize:    150,
@@ -64,21 +58,15 @@ func TestConfigDefaultPaths(t *testing.T) {
 		DataDirs:     dirs,
 	}
 
-	// Verify parquet file path
-	expectedParquet := filepath.Join(appDataDir, "ai_knowledge_base.parquet")
-	if config.ParquetFile != expectedParquet {
-		t.Errorf("ParquetFile path mismatch: expected %s, got %s", expectedParquet, config.ParquetFile)
-	}
-
-	// Verify JSON backup path is in backup subdirectory
-	expectedJSON := filepath.Join(appDataDir, "backup", "json", "ai_knowledge_base.json")
+	// Verify JSON output path
+	expectedJSON := filepath.Join(dirs["json"], "ai_knowledge_base.json")
 	if config.OutputFile != expectedJSON {
 		t.Errorf("OutputFile path mismatch: expected %s, got %s", expectedJSON, config.OutputFile)
 	}
 
-	// Verify JSON is in backup location
-	if !strings.Contains(config.OutputFile, "backup") {
-		t.Error("OutputFile (JSON backup) should be in backup directory")
+	// Verify JSON is in json directory
+	if !strings.Contains(config.OutputFile, "json") {
+		t.Error("OutputFile should be in json directory")
 	}
 
 	// Verify other configuration fields

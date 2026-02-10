@@ -287,7 +287,7 @@ func main() {
 			var err error
 			deployer, err = host.NewDeployer(deployConfig)
 			if err != nil {
-				log.Fatalf("Failed to create required deployer for device %s: %v", *device, err)
+				log.Printf("Warning: Failed to create deployer for device %s: %v", *device, err)
 			}
 		}
 
@@ -295,48 +295,54 @@ func main() {
 		log.Printf("Deploying hasher-server to device %s...", *device)
 		deployedClient, deployErr := deployer.EnsureServerDeployed(*device)
 		if deployErr != nil {
-			log.Fatalf("Failed to deploy hasher-server to device %s: %v", *device, deployErr)
+			log.Printf("Warning: Failed to deploy hasher-server to device %s: %v", *device, deployErr)
+			log.Printf("Falling back to software mode...")
+			asicClient = nil
+		} else {
+			// Use the connected client from deployment (deployment already SSH'd to port 22, deployed, and connected to port 8888)
+			asicClient = deployedClient
+			log.Printf("Successfully deployed and connected to hasher-server on device %s", *device)
 		}
-
-		// Use the connected client from deployment (deployment already SSH'd to port 22, deployed, and connected to port 8888)
-		asicClient = deployedClient
-		log.Printf("Successfully deployed and connected to hasher-server on device %s", *device)
 
 	} else if *asicAddr != "" {
 		// Extract IP from asicAddr for deployment
 		deviceIP := extractIPFromAddress(*asicAddr)
 		if deviceIP == "" {
-			log.Fatalf("Invalid ASIC server address: %s - cannot extract device IP for deployment", *asicAddr)
-		}
+			log.Printf("Warning: Invalid ASIC server address: %s - cannot extract device IP for deployment", *asicAddr)
+			log.Printf("Falling back to software mode...")
+			asicClient = nil
+		} else {
+			log.Printf("ASIC server specified: %s - deploying hasher-server to device %s first", *asicAddr, deviceIP)
+			serverDeviceAddr = *asicAddr
 
-		log.Printf("ASIC server specified: %s - deploying hasher-server to device %s first", *asicAddr, deviceIP)
-		serverDeviceAddr = *asicAddr
-
-		// Deployment is mandatory - create deployer if not already created
-		if deployer == nil {
-			deployConfig := &host.DeploymentConfig{
-				AutoDeploy:     true,
-				CleanupOnExit:  *cleanupOnExit,
-				ConnectTimeout: 30 * time.Second,
-				DeployTimeout:  120 * time.Second,
+			// Deployment is mandatory - create deployer if not already created
+			if deployer == nil {
+				deployConfig := &host.DeploymentConfig{
+					AutoDeploy:     true,
+					CleanupOnExit:  *cleanupOnExit,
+					ConnectTimeout: 30 * time.Second,
+					DeployTimeout:  120 * time.Second,
+				}
+				var createErr error
+				deployer, createErr = host.NewDeployer(deployConfig)
+				if createErr != nil {
+					log.Printf("Warning: Failed to create deployer for device %s: %v", deviceIP, createErr)
+				}
 			}
-			var createErr error
-			deployer, createErr = host.NewDeployer(deployConfig)
-			if createErr != nil {
-				log.Fatalf("Failed to create required deployer for device %s: %v", deviceIP, createErr)
+
+			// Deploy hasher-server to device and get connected client
+			log.Printf("Deploying hasher-server to device %s...", deviceIP)
+			deployedClient, deployErr := deployer.EnsureServerDeployed(deviceIP)
+			if deployErr != nil {
+				log.Printf("Warning: Failed to deploy hasher-server to device %s: %v", deviceIP, deployErr)
+				log.Printf("Falling back to software mode...")
+				asicClient = nil
+			} else {
+				// Use the connected client from deployment (deployment already SSH'd to port 22, deployed, and connected to port 8888)
+				asicClient = deployedClient
+				log.Printf("Successfully deployed and connected to hasher-server on device %s", deviceIP)
 			}
 		}
-
-		// Deploy hasher-server to device and get connected client
-		log.Printf("Deploying hasher-server to device %s...", deviceIP)
-		deployedClient, deployErr := deployer.EnsureServerDeployed(deviceIP)
-		if deployErr != nil {
-			log.Fatalf("Failed to deploy hasher-server to device %s: %v", deviceIP, deployErr)
-		}
-
-		// Use the connected client from deployment (deployment already SSH'd to port 22, deployed, and connected to port 8888)
-		asicClient = deployedClient
-		log.Printf("Successfully deployed and connected to hasher-server on device %s", deviceIP)
 	} else if *discoverNetwork {
 		// Perform network discovery with auto-deployment
 		log.Printf("Discovering hasher-server instances on network...")
@@ -360,7 +366,12 @@ func main() {
 				if err != nil {
 					log.Printf("Warning: Localhost discovery failed: %v", err)
 					log.Printf("Creating ASIC client for direct connection attempt...")
-					asicClient, _ = hasher.NewASICClient("") // Create client for direct connection attempt
+					var clientErr error
+					asicClient, clientErr = hasher.NewASICClient("") // Create client for direct connection attempt
+					if clientErr != nil {
+						log.Printf("Warning: ASIC client creation failed: %v", clientErr)
+						asicClient = nil
+					}
 				} else {
 					log.Printf("Connected to discovered hasher-server at %s", discoveryResult.Address)
 					log.Printf("Server info: %d chips, %s, latency: %dms",
@@ -390,7 +401,12 @@ func main() {
 			if err != nil {
 				log.Printf("Warning: Localhost discovery failed: %v", err)
 				log.Printf("Creating ASIC client for direct connection attempt...")
-				asicClient, _ = hasher.NewASICClient("") // Create client for direct connection attempt
+				var clientErr error
+				asicClient, clientErr = hasher.NewASICClient("") // Create client for direct connection attempt
+				if clientErr != nil {
+					log.Printf("Warning: ASIC client creation failed: %v", clientErr)
+					asicClient = nil
+				}
 			} else {
 				log.Printf("Connected to discovered hasher-server at %s", discoveryResult.Address)
 				log.Printf("Server info: %d chips, %s, latency: %dms",
@@ -406,13 +422,22 @@ func main() {
 		asicClient, err = hasher.NewASICClient("localhost:8888")
 		if err != nil {
 			log.Printf("Warning: Could not connect to localhost hasher-server: %v", err)
+			asicClient = nil
 		}
 	}
 
 	// Default to software fallback if no ASIC device is available or specified
 	if asicClient == nil {
 		log.Printf("No ASIC device available - enabling software fallback mode")
-		asicClient = nil
+		// Create a fallback ASIC client that will use software SHA-256
+		var clientErr error
+		asicClient, clientErr = hasher.NewASICClient("")
+		if clientErr != nil {
+			log.Printf("Warning: Failed to create software fallback client: %v", clientErr)
+			asicClient = nil
+		} else {
+			log.Printf("Software fallback mode initialized successfully")
+		}
 	}
 
 	// Override with explicit flags if provided
@@ -1658,7 +1683,9 @@ func runSingleMode(orch *Orchestrator) {
 	log.Printf("Computing %d single hashes...", *count)
 
 	if orch.asicClient == nil {
-		log.Fatal("ASIC client not available")
+		log.Printf("Warning: ASIC client not available - cannot run single mode")
+		log.Printf("Please start hasher-host with --api flag or ensure an ASIC device is connected")
+		return
 	}
 
 	totalLatency := time.Duration(0)
@@ -1689,7 +1716,9 @@ func runBatchMode(orch *Orchestrator) {
 	log.Printf("Computing %d hashes with batch size %d...", *count, *batchSize)
 
 	if orch.asicClient == nil {
-		log.Fatal("ASIC client not available")
+		log.Printf("Warning: ASIC client not available - cannot run batch mode")
+		log.Printf("Please start hasher-host with --api flag or ensure an ASIC device is connected")
+		return
 	}
 
 	// Prepare all data
@@ -1740,7 +1769,9 @@ func runStreamMode(orch *Orchestrator) {
 	log.Printf("Streaming %d hashes...", *count)
 
 	if orch.asicClient == nil {
-		log.Fatal("ASIC client not available")
+		log.Printf("Warning: ASIC client not available - cannot run stream mode")
+		log.Printf("Please start hasher-host with --api flag or ensure an ASIC device is connected")
+		return
 	}
 
 	// Prepare data
@@ -1783,7 +1814,11 @@ func runStreamMode(orch *Orchestrator) {
 
 func showMetrics(orch *Orchestrator) {
 	if orch.asicClient == nil {
-		log.Fatal("ASIC client not available")
+		log.Printf("Warning: ASIC client not available")
+		fmt.Println("\n=== Hasher Metrics ===")
+		fmt.Println("ASIC client not available - running in software fallback mode")
+		fmt.Println("Metrics are limited when running without ASIC hardware")
+		return
 	}
 
 	resp, err := orch.asicClient.GetMetrics()
@@ -1815,7 +1850,21 @@ func showMetrics(orch *Orchestrator) {
 
 func showInfo(orch *Orchestrator) {
 	if orch.asicClient == nil {
-		log.Fatal("ASIC client not available")
+		log.Printf("Warning: ASIC client not available")
+		fmt.Println("\n=== Device Info ===")
+		fmt.Println("Device Path:      software")
+		fmt.Println("Chip Count:       0")
+		fmt.Println("Firmware Version: software-fallback")
+		fmt.Println("Operational:      true")
+		fmt.Println("Uptime:           N/A")
+		fmt.Println("\n=== Orchestrator Info ===")
+		fmt.Printf("Using ASIC:       %v\n", orch.engine.IsUsingHardware())
+		fmt.Printf("Network:          [%d, %d, %d, %d]\n", *inputSize, *hidden1, *hidden2, *outputSize)
+		fmt.Printf("Passes:           %d\n", *passes)
+		fmt.Printf("Jitter:           %.3f\n", *jitter)
+		fmt.Printf("Seed Rotation:    %v\n", *seedRotation)
+		fmt.Println("\nNote: Running in software fallback mode without ASIC hardware")
+		return
 	}
 
 	resp, err := orch.asicClient.GetDeviceInfo()

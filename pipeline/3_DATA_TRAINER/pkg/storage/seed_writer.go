@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,4 +211,78 @@ func (sw *SeedWriter) GetPendingWrites() map[int32]string {
 	}
 
 	return result
+}
+
+// JSONSeedWriter handles writing best seeds back to the original JSON file
+type JSONSeedWriter struct {
+	sourceFile    string
+	mu            sync.Mutex
+	pendingWrites map[int32]string
+}
+
+// NewJSONSeedWriter creates a new JSONSeedWriter
+func NewJSONSeedWriter(sourceFile string) *JSONSeedWriter {
+	return &JSONSeedWriter{
+		sourceFile:    sourceFile,
+		pendingWrites: make(map[int32]string),
+	}
+}
+
+// AddSeedWrite queues a best seed to be written back
+func (sw *JSONSeedWriter) AddSeedWrite(tokenID int32, bestSeed []byte) error {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.pendingWrites[tokenID] = string(bestSeed)
+	return nil
+}
+
+// WriteBack writes all pending seeds back to the same JSON file
+func (sw *JSONSeedWriter) WriteBack() error {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	if len(sw.pendingWrites) == 0 {
+		return nil
+	}
+
+	// 1. Read existing file
+	data, err := os.ReadFile(sw.sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to read JSON file: %w", err)
+	}
+
+	var records []JSONTrainingRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON: %w", err)
+	}
+
+	// 2. Update records
+	updated := 0
+	for i := range records {
+		if seed, ok := sw.pendingWrites[records[i].TargetTokenID]; ok {
+			records[i].BestSeed = seed
+			updated++
+		}
+	}
+
+	// 3. Write back
+	newData, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+
+	if err := os.WriteFile(sw.sourceFile, newData, 0644); err != nil {
+		return fmt.Errorf("failed to write JSON file: %w", err)
+	}
+
+	// Clear pending writes
+	sw.pendingWrites = make(map[int32]string)
+	fmt.Printf("Successfully updated %d records in %s\n", updated, sw.sourceFile)
+
+	return nil
+}
+
+// GetOutputFile returns the source file (since we write back)
+func (sw *JSONSeedWriter) GetOutputFile() string {
+	return sw.sourceFile
 }

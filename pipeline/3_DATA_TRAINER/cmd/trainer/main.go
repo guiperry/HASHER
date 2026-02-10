@@ -35,6 +35,12 @@ var (
 	sequential     = flag.Bool("sequential", false, "Process tokens sequentially (cleaner logs)")
 )
 
+type seedWriterInterface interface {
+	AddSeedWrite(tokenID int32, bestSeed []byte) error
+	WriteBack() error
+	GetOutputFile() string
+}
+
 type TrainingOrchestrator struct {
 	logger        *logging.Logger
 	simulator     simulator.HashSimulator
@@ -45,7 +51,7 @@ type TrainingOrchestrator struct {
 	checkpointMgr *storage.CheckpointManager
 	dataIngestor  *storage.DataIngestor
 	trainingData  []*training.TrainingRecord
-	seedWriter    *storage.SeedWriter
+	seedWriter    seedWriterInterface
 	config        *config.Config
 	dataPath      string
 	sequential    bool
@@ -243,25 +249,25 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	}
 	var trainingDataPath string
 	if to.dataPath != "" {
-		// Use provided data directory, expecting training_frames.parquet inside
-		trainingDataPath = filepath.Join(to.dataPath, "training_frames.parquet")
+		// Use provided data directory, expecting training_frames.json inside frames subdirectory
+		trainingDataPath = filepath.Join(to.dataPath, "frames", "training_frames.json")
 	} else {
-		// Default path
-		trainingDataPath = filepath.Join(os.Getenv("HOME"), ".local", "share", "hasher", "data", "training_frames.parquet")
+		// Default path in app data directory
+		trainingDataPath = filepath.Join(appDataDir, "frames", "training_frames.json")
 	}
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
 	}
 
 	to.logger.Info("Found training data at: %s", trainingDataPath)
-	dataIngestor := storage.NewDataIngestor(filepath.Dir(trainingDataPath))
+	dataIngestor := storage.NewJSONDataIngestor(filepath.Dir(trainingDataPath))
 	dataIngestor.SetLogger(&ingestionLogger{to.logger})
 	dataIngestor.SetCheckpointManager(to.checkpointMgr)
 	dataIngestor.SetChunkSize(1000) // Process 1000 records at a time
-	to.dataIngestor = dataIngestor
+	to.dataIngestor = dataIngestor.DataIngestor
 
 	to.logger.Info("Initializing seed writer for write-back...")
-	seedWriter := storage.NewSeedWriter(trainingDataPath)
+	seedWriter := storage.NewJSONSeedWriter(trainingDataPath)
 	to.seedWriter = seedWriter
 
 	trainingRecords, err := dataIngestor.ProcessAllFiles(nil)

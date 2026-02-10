@@ -62,7 +62,6 @@ func SetupDataDirectories(appDataDir string) (map[string]string, error) {
 		"json":        filepath.Join(appDataDir, "json"),
 		"documents":   filepath.Join(appDataDir, "documents"),
 		"temp":        filepath.Join(appDataDir, "temp"),
-		"backup":      filepath.Join(appDataDir, "backup"),
 	}
 
 	// Create all directories

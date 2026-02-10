@@ -61,16 +61,14 @@ func ParseFlags() *Config {
 		dirs = map[string]string{
 			"checkpoints": filepath.Join(appDataDir, "checkpoints"),
 			"papers":      filepath.Join(appDataDir, "papers"),
-			"json":        filepath.Join(appDataDir, "backup", "json"),
+			"json":        filepath.Join(appDataDir, "json"),
 			"documents":   filepath.Join(appDataDir, "documents"),
 			"temp":        filepath.Join(appDataDir, "temp"),
-			"backup":      filepath.Join(appDataDir, "backup"),
 		}
 	}
 
 	config := &Config{
 		InputDir:     dirs["documents"],
-		ParquetFile:  filepath.Join(appDataDir, "ai_knowledge_base.parquet"),
 		OutputFile:   filepath.Join(dirs["json"], "ai_knowledge_base.json"),
 		NumWorkers:   numWorkers,
 		ChunkSize:    150,
@@ -330,8 +328,7 @@ func ValidateConfiguration(config *Config) error {
 func PrintConfiguration(config *Config) {
 	fmt.Println("📋 Configuration:")
 	fmt.Printf("  📂 Input Directory: %s\n", config.InputDir)
-	fmt.Printf("  📊 Parquet File (Primary): %s\n", config.ParquetFile)
-	fmt.Printf("  📄 JSON Backup: %s\n", config.OutputFile)
+	fmt.Printf("  📄 JSON Output: %s\n", config.OutputFile)
 	fmt.Printf("  🔧 Workers: %d\n", config.NumWorkers)
 	fmt.Printf("  📝 Chunk Size: %d words\n", config.ChunkSize)
 	fmt.Printf("  🔄 Chunk Overlap: %d words\n", config.ChunkOverlap)

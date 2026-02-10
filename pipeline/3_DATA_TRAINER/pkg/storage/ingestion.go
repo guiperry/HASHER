@@ -3,6 +3,7 @@ package storage
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -199,6 +200,17 @@ func NewDataIngestor(basePath string) *DataIngestor {
 	}
 }
 
+// JSONDataIngestor is similar to DataIngestor but works with JSON files
+type JSONDataIngestor struct {
+	*DataIngestor
+}
+
+// NewJSONDataIngestor creates a new JSONDataIngestor for JSON files
+func NewJSONDataIngestor(basePath string) *JSONDataIngestor {
+	di := NewDataIngestor(basePath)
+	return &JSONDataIngestor{DataIngestor: di}
+}
+
 func (di *DataIngestor) SetLogger(logger IngestionLogger) {
 	di.logger = logger
 }
@@ -233,6 +245,10 @@ func (di *DataIngestor) getAvailableFiles() ([]string, error) {
 		}
 		if strings.HasSuffix(strings.ToLower(info.Name()), ".parquet") {
 			files = append(files, path)
+		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+			files = append(files, path)
+		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".arrow") {
+			files = append(files, path)
 		}
 		return nil
 	})
@@ -263,7 +279,7 @@ func (di *DataIngestor) GetNextFile() (string, error) {
 	}
 
 	if len(files) == 0 {
-		return "", fmt.Errorf("no parquet files found in %s", di.basePath)
+		return "", fmt.Errorf("no parquet or json files found in %s", di.basePath)
 	}
 
 	di.fileIndex++
@@ -320,7 +336,7 @@ func (di *DataIngestor) countRecordsInFile(filePath string) (int64, error) {
 }
 
 func (di *DataIngestor) ReadTrainingRecords(filePath string) ([]*training.TrainingRecord, error) {
-	di.logger.Debug("Opening parquet file: %s", filepath.Base(filePath))
+	di.logger.Debug("Opening file: %s", filepath.Base(filePath))
 
 	// Check if file exists
 	fileInfo, err := os.Stat(filePath)
@@ -339,7 +355,17 @@ func (di *DataIngestor) ReadTrainingRecords(filePath string) ([]*training.Traini
 	}, 1)
 
 	go func() {
-		records, err := di.readParquetFile(filePath)
+		var records []*training.TrainingRecord
+		var err error
+
+		if strings.HasSuffix(strings.ToLower(filePath), ".json") {
+			records, err = di.readJSONFile(filePath)
+		} else if strings.HasSuffix(strings.ToLower(filePath), ".arrow") {
+			records, err = di.readArrowFile(filePath)
+		} else {
+			records, err = di.readParquetFile(filePath)
+		}
+
 		done <- struct {
 			records []*training.TrainingRecord
 			err     error
@@ -367,44 +393,33 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func (di *DataIngestor) validateParquetFile(filePath string) error {
+
+func (di *DataIngestor) readJSONFile(filePath string) ([]*training.TrainingRecord, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
+		return nil, fmt.Errorf("failed to open JSON file: %w", err)
 	}
 	defer file.Close()
 
-	// Get file size
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to stat file: %w", err)
+	var jsonRecords []JSONTrainingRecord
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&jsonRecords); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	if info.Size() < 8 {
-		return fmt.Errorf("file too small to be a valid parquet file (%d bytes)", info.Size())
+	di.logger.Info("Successfully loaded %d JSON records", len(jsonRecords))
+
+	// Convert JSON records to training records
+	var records []*training.TrainingRecord
+	for _, jsonRec := range jsonRecords {
+		record := di.convertJSONRecord(&jsonRec)
+		if record != nil {
+			records = append(records, record)
+		}
 	}
 
-	// Check magic bytes at beginning
-	magic := make([]byte, 4)
-	if _, err := file.Read(magic); err != nil {
-		return fmt.Errorf("failed to read header magic: %w", err)
-	}
-	if string(magic) != "PAR1" {
-		return fmt.Errorf("invalid parquet header magic: %s (expected PAR1)", string(magic))
-	}
-
-	// Check magic bytes at end (footer)
-	if _, err := file.Seek(-4, 2); err != nil {
-		return fmt.Errorf("failed to seek to footer: %w", err)
-	}
-	if _, err := file.Read(magic); err != nil {
-		return fmt.Errorf("failed to read footer magic: %w", err)
-	}
-	if string(magic) != "PAR1" {
-		return fmt.Errorf("invalid or missing parquet footer magic: %s (expected PAR1). File may be truncated or corrupted", string(magic))
-	}
-
-	return nil
+	di.logger.Info("Successfully converted %d JSON records to training format", len(records))
+	return records, nil
 }
 
 func (di *DataIngestor) readParquetFile(filePath string) ([]*training.TrainingRecord, error) {
@@ -507,6 +522,27 @@ func (di *DataIngestor) readCSVAndConvert(csvPath string) ([]*training.TrainingR
 	return records, scanner.Err()
 }
 
+func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.TrainingRecord {
+	record := &training.TrainingRecord{
+		TargetToken: jr.TargetTokenID,
+		ContextHash: uint32(jr.ChunkID), // Using ChunkID as context identifier
+	}
+
+	// Map ASIC slots to FeatureVector
+	record.FeatureVector = [12]uint32{
+		uint32(jr.AsicSlots0), uint32(jr.AsicSlots1), uint32(jr.AsicSlots2), uint32(jr.AsicSlots3),
+		uint32(jr.AsicSlots4), uint32(jr.AsicSlots5), uint32(jr.AsicSlots6), uint32(jr.AsicSlots7),
+		uint32(jr.AsicSlots8), uint32(jr.AsicSlots9), uint32(jr.AsicSlots10), uint32(jr.AsicSlots11),
+	}
+
+	// Validate record
+	if !record.Validate() {
+		return nil
+	}
+
+	return record
+}
+
 func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *training.TrainingRecord {
 	record := &training.TrainingRecord{
 		TargetToken: pr.TargetTokenID,
@@ -599,10 +635,10 @@ func (di *DataIngestor) ProcessAllFilesWithProgress(progressCallback func(*Inges
 	}
 
 	if len(availableFiles) == 0 {
-		return nil, fmt.Errorf("no parquet files found in %s", di.basePath)
+		return nil, fmt.Errorf("no parquet or json files found in %s", di.basePath)
 	}
 
-	di.logger.Info("Found %d parquet file(s)", len(availableFiles))
+	di.logger.Info("Found %d parquet/json file(s)", len(availableFiles))
 
 	// Get total records estimate for progress bar
 	totalRecords, err := di.GetTotalRecords()
@@ -690,6 +726,8 @@ func (di *DataIngestor) ProcessAllFilesWithProgress(progressCallback func(*Inges
 func (di *DataIngestor) processFileWithCheckpoints(filePath string, stats *IngestionStats, progressCallback func(*IngestionStats)) ([]*training.TrainingRecord, error) {
 	// Simplified approach: read entire file at once to avoid seek issues
 	// In production with very large files, you'd want a more sophisticated approach
+	_ = stats
+	_ = progressCallback
 	records, err := di.ReadTrainingRecords(filePath)
 	if err != nil {
 		return nil, err
@@ -698,17 +736,6 @@ func (di *DataIngestor) processFileWithCheckpoints(filePath string, stats *Inges
 	return records, nil
 }
 
-func (di *DataIngestor) loadIngestionCheckpoint(filePath string) *IngestionCheckpoint {
-	return nil
-}
-
-func (di *DataIngestor) saveIngestionCheckpoint(filePath string, offset int64) error {
-	return nil
-}
-
-func (di *DataIngestor) clearIngestionCheckpoint(filePath string) error {
-	return nil
-}
 
 // ProcessAllFiles is the original method - now delegates to ProcessAllFilesWithProgress
 func (di *DataIngestor) ProcessAllFiles(progressChan chan<- *IngestionStats) ([]*training.TrainingRecord, error) {
