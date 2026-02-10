@@ -31,7 +31,7 @@ mkdir -p "$CHECKPOINT_DIR"
 # Build the project
 echo -e "${BLUE}📦 Building the project...${NC}"
 cd "$PROJECT_ROOT"
-go build -o dataminer ./cmd/dataminer
+go build -o data-miner ./cmd/data-miner
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Build failed!${NC}"
@@ -67,7 +67,7 @@ echo ""
 # Run the integrated workflow
 echo -e "${YELLOW}🚀 Starting integrated workflow...${NC}"
 
-CLOUDFLARE_DAILY_LIMIT=100 ./dataminer \
+CLOUDFLARE_DAILY_LIMIT=100 ./data-miner \
     -arxiv-enable \
     -arxiv-categories "$TEST_CATEGORIES" \
     -arxiv-max-papers "$TEST_MAX_PAPERS" \

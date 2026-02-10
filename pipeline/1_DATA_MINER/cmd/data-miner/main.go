@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"dataminer/internal/app"
+	"data-miner/internal/app"
 )
 
 func main() {

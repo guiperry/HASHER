@@ -74,9 +74,9 @@ type MinedRecord struct {
 
 The encoder automatically detects the best available input file:
 
-1. **Primary**: `~/.local/share/dataminer/ai_knowledge_base.parquet`
-2. **Backup**: `~/.local/share/dataminer/backup/json/ai_knowledge_base.json`
-3. **Legacy**: `~/.local/share/dataminer/json/ai_knowledge_base.json`
+1. **Primary**: `~/.local/share/data-miner/ai_knowledge_base.parquet`
+2. **Backup**: `~/.local/share/data-miner/backup/json/ai_knowledge_base.json`
+3. **Legacy**: `~/.local/share/data-miner/json/ai_knowledge_base.json`
 
 ### Output Schema (Parquet)
 
@@ -152,14 +152,14 @@ The following dependencies are automatically downloaded:
 
 The encoder automatically detects the best available input file in priority order:
 
-1. `~/.local/share/dataminer/ai_knowledge_base.parquet` (Primary)
-2. `~/.local/share/dataminer/backup/json/ai_knowledge_base.json` (Backup)
-3. `~/.local/share/dataminer/json/ai_knowledge_base.json` (Legacy)
+1. `~/.local/share/data-miner/ai_knowledge_base.parquet` (Primary)
+2. `~/.local/share/data-miner/backup/json/ai_knowledge_base.json` (Backup)
+3. `~/.local/share/data-miner/json/ai_knowledge_base.json` (Legacy)
 
 ### Explicit Input Path
 
 ```bash
-./data-encoder -input ~/.local/share/dataminer/ai_knowledge_base.parquet
+./data-encoder -input ~/.local/share/data-miner/ai_knowledge_base.parquet
 ```
 
 This will create `training_frames.parquet` in the application data directory (`~/.local/share/data-encoder/`).
@@ -169,7 +169,7 @@ This will create `training_frames.parquet` in the application data directory (`~
 ```
 -input string
     Input file path - JSON or Parquet format (auto-detected if not specified)
-    Default: ~/.local/share/dataminer/ai_knowledge_base.parquet (with fallback)
+    Default: ~/.local/share/data-miner/ai_knowledge_base.parquet (with fallback)
 
 -output string
     Output Parquet file path (default "~/.local/share/data-encoder/training_frames.parquet")
@@ -197,20 +197,20 @@ This will create `training_frames.parquet` in the application data directory (`~
 #### Processing Parquet Input (Recommended)
 
 ```bash
-./data-encoder -input ~/.local/share/dataminer/ai_knowledge_base.parquet
+./data-encoder -input ~/.local/share/data-miner/ai_knowledge_base.parquet
 ```
 
 #### Using JSON Backup
 
 ```bash
-./data-encoder -input ~/.local/share/dataminer/backup/json/ai_knowledge_base.json
+./data-encoder -input ~/.local/share/data-miner/backup/json/ai_knowledge_base.json
 ```
 
 #### Custom Output Path
 
 ```bash
 ./data-encoder \
-  -input ~/.local/share/dataminer/ai_knowledge_base.parquet \
+  -input ~/.local/share/data-miner/ai_knowledge_base.parquet \
   -output ./output/training_data.parquet
 ```
 
@@ -277,13 +277,13 @@ For fallback scenarios, maintain a JSON backup:
 
 ```bash
 # Create backup directory
-mkdir -p ~/.local/share/dataminer/backup/json
+mkdir -p ~/.local/share/data-miner/backup/json
 
 # Convert Parquet to JSON (example using Python)
 python3 -c "
 import pyarrow.parquet as pq
 df = pq.read_table('ai_knowledge_base.parquet').to_pandas()
-df.to_json('~/.local/share/dataminer/backup/json/ai_knowledge_base.json', orient='records', lines=True)
+df.to_json('~/.local/share/data-miner/backup/json/ai_knowledge_base.json', orient='records', lines=True)
 "
 ```
 
@@ -398,13 +398,13 @@ Ensure at least one input file exists:
 
 ```bash
 # Check for Parquet (primary)
-ls -la ~/.local/share/dataminer/ai_knowledge_base.parquet
+ls -la ~/.local/share/data-miner/ai_knowledge_base.parquet
 
 # Check for JSON backup
-ls -la ~/.local/share/dataminer/backup/json/ai_knowledge_base.json
+ls -la ~/.local/share/data-miner/backup/json/ai_knowledge_base.json
 
 # Check for legacy JSON
-ls -la ~/.local/share/dataminer/json/ai_knowledge_base.json
+ls -la ~/.local/share/data-miner/json/ai_knowledge_base.json
 ```
 
 ### Parquet Read Errors

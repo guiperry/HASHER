@@ -184,7 +184,7 @@ fi
 # Build the project
 print_status "Building the project..."
 cd "$PROJECT_ROOT"
-go build -o dataminer ./cmd/dataminer
+go build -o data-miner ./cmd/data-miner
 
 if [ $? -ne 0 ]; then
     print_error "Build failed!"
@@ -204,7 +204,7 @@ if [ -n "$CLOUDFLARE_LIMIT" ]; then
 fi
 
 # Prepare command
-CMD="./dataminer"
+CMD="./data-miner"
 ARGS=()
 
 if [ "$NO_ARXIV" = false ]; then

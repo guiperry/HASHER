@@ -68,23 +68,23 @@ The application includes recommended ML/AI categories:
 ### One-time Mining
 ```bash
 # Mine recent papers from recommended categories
-./dataminer -arxiv-enable -arxiv-max-papers 50
+./data-miner -arxiv-enable -arxiv-max-papers 50
 
 # Mine specific categories
-./dataminer -arxiv-enable -arxiv-categories "cs.AI,cs.LG,stat.ML" -arxiv-max-papers 100
+./data-miner -arxiv-enable -arxiv-categories "cs.AI,cs.LG,stat.ML" -arxiv-max-papers 100
 ```
 
 ### Background Service
 ```bash
 # Run background service that mines every hour
-./dataminer -arxiv-enable -arxiv-background -arxiv-interval "1h" -arxiv-max-papers 25
+./data-miner -arxiv-enable -arxiv-background -arxiv-interval "1h" -arxiv-max-papers 25
 ```
 
 ### Combined Workflow
 ```bash
 # First mine papers, then process them
-./dataminer -arxiv-enable -arxiv-categories "cs.AI" -arxiv-max-papers 10
-./dataminer -input ./documents -output training_data.json
+./data-miner -arxiv-enable -arxiv-categories "cs.AI" -arxiv-max-papers 10
+./data-miner -input ./documents -output training_data.json
 ```
 
 ## Testing Results

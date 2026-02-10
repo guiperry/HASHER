@@ -45,7 +45,7 @@ PATTERNS=(
     "device-probe"
     "device-monitor"
     "asic-monitor"
-    "dataminer"
+    "data-miner"
     "data-encoder"
     "data-trainer"
 )

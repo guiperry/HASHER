@@ -1,8 +1,8 @@
 package dataminer_test
 
 import (
-	"dataminer/internal/app"
-	"dataminer/internal/checkpoint"
+	"data-miner/internal/app"
+	"data-miner/internal/checkpoint"
 	"encoding/json"
 	"strings"
 	"testing"

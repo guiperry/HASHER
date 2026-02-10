@@ -1,7 +1,7 @@
 package dataminer_test
 
 import (
-	"dataminer/internal/app"
+	"data-miner/internal/app"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -59,7 +59,7 @@ func TestJSONOutputLocation(t *testing.T) {
 // TestDataDirectoryStructureNew verifies new directory structure
 func TestDataDirectoryStructureNew(t *testing.T) {
 	tempDir := t.TempDir()
-	appDir := filepath.Join(tempDir, "dataminer")
+	appDir := filepath.Join(tempDir, "data-miner")
 
 	// Setup directories
 	dirs, err := app.SetupDataDirectories(appDir)

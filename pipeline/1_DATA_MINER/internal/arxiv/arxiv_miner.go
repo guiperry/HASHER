@@ -1,7 +1,7 @@
 package arxiv
 
 import (
-	"dataminer/internal/checkpoint"
+	"data-miner/internal/checkpoint"
 	"fmt"
 	"io"
 	"log"

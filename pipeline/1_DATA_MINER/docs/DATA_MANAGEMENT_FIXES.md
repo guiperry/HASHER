@@ -7,9 +7,9 @@ Fixed the data management functionality to implement proper OS-specific data dir
 
 ### 1. OS-Specific Application Data Directory (`internal/app/data_dirs.go`)
 - Created `GetAppDataDir()` function that returns OS-specific data directories:
-  - Windows: `%APPDATA%/dataminer`
-  - macOS: `~/Library/Application Support/dataminer`
-  - Linux/Unix: `~/.local/share/dataminer` (following XDG Base Directory Specification)
+  - Windows: `%APPDATA%/data-miner`
+  - macOS: `~/Library/Application Support/data-miner`
+  - Linux/Unix: `~/.local/share/data-miner` (following XDG Base Directory Specification)
 - Added `SetupDataDirectories()` to create all necessary subdirectories
 
 ### 2. Updated Configuration (`internal/app/config.go` & `internal/app/types.go`)
@@ -57,7 +57,7 @@ Fixed the data management functionality to implement proper OS-specific data dir
 
 ## Directory Structure (Example Linux)
 ```
-~/.local/share/dataminer/
+~/.local/share/data-miner/
 ├── checkpoints/
 │   └── checkpoints.db
 ├── papers/

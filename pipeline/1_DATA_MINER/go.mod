@@ -1,4 +1,4 @@
-module dataminer
+module data-miner
 
 go 1.23
 

@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"dataminer/internal/arxiv"
-	"dataminer/internal/checkpoint"
-	"dataminer/internal/embedder"
+	"data-miner/internal/arxiv"
+	"data-miner/internal/checkpoint"
+	"data-miner/internal/embedder"
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"

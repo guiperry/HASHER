@@ -103,7 +103,7 @@ func BuildProject() error {
 
 	fmt.Println("🔨 Building Data Miner...")
 
-	cmd := exec.Command("go", "build", "-o", filepath.Join(projectRoot, "dataminer"), "./cmd/dataminer")
+	cmd := exec.Command("go", "build", "-o", filepath.Join(projectRoot, "data-miner"), "./cmd/data-miner")
 	cmd.Dir = projectRoot
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -157,7 +157,7 @@ func CleanProject() error {
 	}
 
 	// Remove binary
-	binaryPath := filepath.Join(projectRoot, "dataminer")
+	binaryPath := filepath.Join(projectRoot, "data-miner")
 	if _, err := os.Stat(binaryPath); err == nil {
 		if err := os.Remove(binaryPath); err != nil {
 			return fmt.Errorf("failed to remove binary: %w", err)
@@ -192,7 +192,7 @@ func ShowUsage() error {
 	fmt.Println("=========================================")
 	fmt.Println("")
 	fmt.Println("Usage:")
-	fmt.Println("  dataminer [command|mode] [flags]")
+	fmt.Println("  data-miner [command|mode] [flags]")
 	fmt.Println("")
 	fmt.Println("Commands:")
 	fmt.Println("  run-workflow    Run production workflow")
@@ -203,7 +203,7 @@ func ShowUsage() error {
 	fmt.Println("  build           Build the project")
 	fmt.Println("  deps            Check dependencies")
 	fmt.Println("  clean           Clean build artifacts")
-	fmt.Println("  kill            Kill all running dataminer processes")
+	fmt.Println("  kill            Kill all running data-miner processes")
 	fmt.Println("  help            Show this help")
 	fmt.Println("  list-modes      List available modes")
 	fmt.Println("")
@@ -247,11 +247,11 @@ func ShowUsage() error {
 	fmt.Println("  CLOUDFLARE_DAILY_LIMIT     Cloudflare daily request limit")
 	fmt.Println("")
 	fmt.Println("Examples:")
-	fmt.Println("  dataminer run-workflow                    # Production workflow")
-	fmt.Println("  dataminer test-workflow                   # Test workflow")
-	fmt.Println("  dataminer -production -arxiv-enable      # Production with arXiv")
-	fmt.Println("  dataminer -input /path/to/pdfs -output out.json  # Custom paths")
-	fmt.Println("  DATAMINER_MODE=production dataminer      # Environment mode")
+	fmt.Println("  data-miner run-workflow                    # Production workflow")
+	fmt.Println("  data-miner test-workflow                   # Test workflow")
+	fmt.Println("  data-miner -production -arxiv-enable      # Production with arXiv")
+	fmt.Println("  data-miner -input /path/to/pdfs -output out.json  # Custom paths")
+	fmt.Println("  DATAMINER_MODE=production data-miner      # Environment mode")
 
 	return nil
 }
@@ -265,8 +265,8 @@ func getProjectRoot() (string, error) {
 	}
 
 	exeDir := filepath.Dir(exePath)
-	// If running from cmd/dataminer directory, project root is parent
-	if filepath.Base(exeDir) == "dataminer" && filepath.Base(filepath.Dir(exeDir)) == "cmd" {
+	// If running from cmd/data-miner directory, project root is parent
+	if filepath.Base(exeDir) == "data-miner" && filepath.Base(filepath.Dir(exeDir)) == "cmd" {
 		return filepath.Dir(filepath.Dir(exeDir)), nil
 	}
 	return exeDir, nil
@@ -291,7 +291,7 @@ func getDefaultWorkers() int {
 }
 
 func ensureBuilt(projectRoot string) error {
-	binaryPath := filepath.Join(projectRoot, "dataminer")
+	binaryPath := filepath.Join(projectRoot, "data-miner")
 	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
 		fmt.Println("🔨 Dataminer binary not found, building...")
 		return BuildProject()
@@ -325,9 +325,9 @@ func isValidMode(mode string) bool {
 	return false
 }
 
-// KillDataminer kills all running dataminer processes
+// KillDataminer kills all running data-miner processes
 func KillDataminer() error {
-	fmt.Println("🛑 Killing all dataminer processes...")
+	fmt.Println("🛑 Killing all data-miner processes...")
 
 	// Get the project root to find the kill script
 	projectRoot, err := getProjectRoot()
@@ -356,22 +356,22 @@ func KillDataminer() error {
 	return nil
 }
 
-// killDataminerFallback kills dataminer processes directly without the script
+// killDataminerFallback kills data-miner processes directly without the script
 func killDataminerFallback() error {
 	// Try graceful shutdown first
-	fmt.Println("🛑 Sending SIGTERM to dataminer processes...")
-	exec.Command("pkill", "-TERM", "-f", "dataminer").Run()
+	fmt.Println("🛑 Sending SIGTERM to data-miner processes...")
+	exec.Command("pkill", "-TERM", "-f", "data-miner").Run()
 
 	// Wait a bit
 	time.Sleep(2 * time.Second)
 
 	// Check if any are still running
-	cmd := exec.Command("pgrep", "-f", "dataminer")
+	cmd := exec.Command("pgrep", "-f", "data-miner")
 	output, _ := cmd.Output()
 
 	if len(output) > 0 {
 		fmt.Println("⚠️  Processes still running, sending SIGKILL...")
-		exec.Command("pkill", "-KILL", "-f", "dataminer").Run()
+		exec.Command("pkill", "-KILL", "-f", "data-miner").Run()
 	}
 
 	fmt.Println("✅ Done")

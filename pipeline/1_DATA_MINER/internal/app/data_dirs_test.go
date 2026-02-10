@@ -29,7 +29,7 @@ func TestGetAppDataDir(t *testing.T) {
 func TestSetupDataDirectories(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir := t.TempDir()
-	appDir := filepath.Join(tempDir, "dataminer")
+	appDir := filepath.Join(tempDir, "data-miner")
 
 	dirs, err := SetupDataDirectories(appDir)
 	if err != nil {

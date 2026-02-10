@@ -2,7 +2,7 @@
 # Document Structuring Engine - PDF to ML-ready data pipeline
 
 # Project configuration
-PROJECT_NAME := dataminer
+PROJECT_NAME := data-miner
 BINARY_NAME := data-miner
 MAIN_PACKAGE := ./cmd/$(PROJECT_NAME)
 BIN_DIR := bin

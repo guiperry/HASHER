@@ -26,7 +26,7 @@ A production-ready Go application that processes PDF documents and converts them
 2. **Installation**:
    ```bash
    go mod tidy
-   go build -o dataminer .
+   go build -o data-miner .
    ```
 
 3. **Usage**:
@@ -43,7 +43,7 @@ A production-ready Go application that processes PDF documents and converts them
     ./run_workflow.sh --no-arxiv
     
     # Direct workflow execution
-    ./dataminer -arxiv-enable -arxiv-categories "cs.AI,cs.LG" -arxiv-max-papers 50
+    ./data-miner -arxiv-enable -arxiv-categories "cs.AI,cs.LG" -arxiv-max-papers 50
     ```
     
     **Traditional PDF Processing**:
@@ -52,22 +52,22 @@ A production-ready Go application that processes PDF documents and converts them
     ./run.sh
     
     # Direct execution
-    ./dataminer -input ./documents -output training_data.json
+    ./data-miner -input ./documents -output training_data.json
     ```
     
     **arXiv Mining - One-time Download**:
     ```bash
     # Mine recent papers from recommended ML/AI categories
-    ./dataminer -arxiv-enable -arxiv-max-papers 50
+    ./data-miner -arxiv-enable -arxiv-max-papers 50
     
     # Mine specific categories
-    ./dataminer -arxiv-enable -arxiv-categories "cs.AI,cs.LG,stat.ML" -arxiv-max-papers 100
+    ./data-miner -arxiv-enable -arxiv-categories "cs.AI,cs.LG,stat.ML" -arxiv-max-papers 100
     ```
     
     **arXiv Mining - Background Service**:
     ```bash
     # Run background service that mines every hour
-    ./dataminer -arxiv-enable -arxiv-background -arxiv-interval "1h" -arxiv-max-papers 25
+    ./data-miner -arxiv-enable -arxiv-background -arxiv-interval "1h" -arxiv-max-papers 25
     ```
 
 ## Configuration Options
@@ -201,7 +201,7 @@ export OLLAMA_FLASH_ATTENTION=1
 ./run_hybrid.sh
 
 # Or manual configuration
-CLOUDFLARE_DAILY_LIMIT=1000 ./dataminer -input ./documents
+CLOUDFLARE_DAILY_LIMIT=1000 ./data-miner -input ./documents
 ```
 
 ### Performance Comparison

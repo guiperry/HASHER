@@ -14,7 +14,7 @@
 
 ### Project Structure
 ```
-dataminer/
+data-miner/
 ├── main.go              # Main application logic
 ├── main_test.go         # Unit tests
 ├── go.mod               # Go modules and dependencies
@@ -102,7 +102,7 @@ The output file contains an array of these objects, ready for:
 
 ### Advanced Configuration
 ```bash
-./dataminer \
+./data-miner \
   -input ./research_papers \
   -output research_embeddings.json \
   -workers 8 \
@@ -116,10 +116,10 @@ The output file contains an array of these objects, ready for:
 ### Docker Usage
 ```bash
 # Build for container
-CGO_ENABLED=0 go build -o dataminer .
+CGO_ENABLED=0 go build -o data-miner .
 
 # Run in container with mounted volume
-docker run -v $(pwd)/documents:/app/documents dataminer
+docker run -v $(pwd)/documents:/app/documents data-miner
 ```
 
 ## ✅ PRODUCTION DEPLOYMENT CHECKLIST

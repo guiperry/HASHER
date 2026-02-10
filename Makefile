@@ -24,7 +24,7 @@ CLANG=clang
 LLVM_STRIP=llvm-strip
 
 
-.PHONY: all build clean test proto ebpf deps help build-asic-test build-probe build-probe build-probe-v2 build-protocol-discover build-monitor build-diagnostics deploy deploy-probe deploy-probe-v2 deploy-protocol-discover deploy-monitor deploy-diagnostics cli test-cli build-all build-server-mips build-host build-host-all embed-binaries build-crypto-transformer train-crypto-transformer run-crypto-transformer build-simple-hash run-simple-hash build-pipeline-all build-dataminer build-data-encoder build-data-trainer
+.PHONY: all build clean test proto ebpf deps help build-asic-test build-probe build-probe build-probe-v2 build-protocol-discover build-monitor build-diagnostics deploy deploy-probe deploy-probe-v2 deploy-protocol-discover deploy-monitor deploy-diagnostics cli test-cli build-all build-server-mips build-host build-host-all embed-binaries build-crypto-transformer train-crypto-transformer run-crypto-transformer build-simple-hash run-simple-hash build-pipeline-all build-data-miner build-data-encoder build-data-trainer
 
 ANTMINER_IP ?= $(shell [ -f .env ] && source .env && echo $$DEVICE_IP || echo 192.168.12.151)
 ANTMINER_USER ?= root
@@ -331,7 +331,7 @@ endef
 
 ## build-data-miner: Build data miner pipeline binary
 build-data-miner:
-	$(call build-pipeline-binary,data-miner,1_DATA_MINER,./cmd/dataminer)
+	$(call build-pipeline-binary,data-miner,1_DATA_MINER,./cmd/data-miner)
 
 ## build-data-encoder: Build data encoder pipeline binary
 build-data-encoder:
@@ -342,7 +342,7 @@ build-data-trainer:
 	$(call build-pipeline-binary,data-trainer,3_DATA_TRAINER,./cmd/trainer)
 
 ## build-pipeline-all: Build all pipeline binaries
-build-pipeline-all: build-dataminer build-data-encoder build-data-trainer
+build-pipeline-all: build-data-miner build-data-encoder build-data-trainer
 	@echo "✅ All pipeline binaries built"
 	@echo "📦 Pipeline binaries in: $(EMBED_DIR)"
 	@ls -lh $(EMBED_DIR)/

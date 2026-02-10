@@ -99,7 +99,7 @@ export CLOUDFLARE_DAILY_LIMIT=1000
 ./run_hybrid.sh
 
 # Manual execution with full control
-CLOUDFLARE_DAILY_LIMIT=500 ./dataminer \
+CLOUDFLARE_DAILY_LIMIT=500 ./data-miner \
   -input ./documents \
   -output embeddings.json \
   -batch-size 4
@@ -138,7 +138,7 @@ The hybrid embeddings work **seamlessly** with your existing arXiv mining:
 
 ```bash
 # Mine and process with ultra-fast embeddings
-./dataminer -arxiv-enable -arxiv-categories "cs.AI,cs.LG" -arxiv-max-papers 100
+./data-miner -arxiv-enable -arxiv-categories "cs.AI,cs.LG" -arxiv-max-papers 100
 
 # Follow with hybrid embeddings processing  
 ./run_hybrid.sh ./documents ai_papers.json

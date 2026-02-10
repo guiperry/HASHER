@@ -284,7 +284,7 @@ Ensure your project looks like this before running:
 /DATA_ENCODER
 ├── main.go                # The entry point
 ├── go.mod                 # Dependencies
-├── ~/.local/share/dataminer/json/ai_knowledge_base.json        # Input from Stage 1
+├── ~/.local/share/data-miner/json/ai_knowledge_base.json        # Input from Stage 1
 ├── pkg/
 │   ├── mapper/
 │   │   └── mapper.go      # Feature Mapping Logic
@@ -310,7 +310,7 @@ go get github.com/xitongsys/parquet-go-source
 
 ### 5.3 Execution
 
-1. The `ai_knowledge_base.json` should be automatically detected in the ~/.local/share/dataminer/json/ folder.
+1. The `ai_knowledge_base.json` should be automatically detected in the ~/.local/share/data-miner/json/ folder.
 2. Run `go run main.go`.
 3. The result will be `training_frames.parquet`.
 

@@ -9,7 +9,7 @@ import (
 func TestNew(t *testing.T) {
 	// Test with environment variable set
 	t.Run("with endpoint", func(t *testing.T) {
-		testURL := "http://test.endpoint"
+		testURL := "http://embeddings.knirv.com"
 		t.Setenv("CLOUDFLARE_EMBEDDINGS_WORKER", testURL)
 		svc := New()
 

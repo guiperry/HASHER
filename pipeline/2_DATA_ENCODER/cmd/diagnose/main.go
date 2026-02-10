@@ -12,7 +12,7 @@ import (
 func main() {
 	// Default input path
 	homeDir, _ := os.UserHomeDir()
-	inputFile := filepath.Join(homeDir, ".local", "share", "dataminer", "json", "ai_knowledge_base.json")
+	inputFile := filepath.Join(homeDir, ".local", "share", "data-miner", "json", "ai_knowledge_base.json")
 
 	// Read and parse the JSON to see the actual structure
 	content, err := os.ReadFile(inputFile)

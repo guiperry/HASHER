@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"dataminer/internal/embedder"
+	"data-miner/internal/embedder"
 )
 
 // CheckOrStartOllama checks if Ollama is running and starts it if necessary

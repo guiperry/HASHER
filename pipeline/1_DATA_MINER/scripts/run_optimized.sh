@@ -98,11 +98,11 @@ echo "  Workers: $NUM_WORKERS"
 echo "  Chunk size: $CHUNK_SIZE"
 echo "  Batch size: $BATCH_SIZE"
 
-# Check if dataminer binary exists
-DATAMINER_BINARY="$PROJECT_ROOT/cmd/dataminer/dataminer"
+# Check if data-miner binary exists
+DATAMINER_BINARY="$PROJECT_ROOT/cmd/data-miner/data-miner"
 if [ ! -f "$DATAMINER_BINARY" ]; then
     echo "🔨 Dataminer binary not found, building..."
-    cd "$PROJECT_ROOT/cmd/dataminer" && go build -o dataminer main.go
+    cd "$PROJECT_ROOT/cmd/data-miner" && go build -o data-miner main.go
 fi
 
 # Run the neural miner

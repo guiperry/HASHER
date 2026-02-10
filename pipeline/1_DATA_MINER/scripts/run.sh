@@ -62,11 +62,11 @@ echo "   Ollama Host: $OLLAMA_HOST"
 echo "   Batch Size: $BATCH_SIZE"
 echo ""
 
-# Check if dataminer binary exists
-DATAMINER_BINARY="$PROJECT_ROOT/cmd/dataminer/dataminer"
+# Check if data-miner binary exists
+DATAMINER_BINARY="$PROJECT_ROOT/cmd/data-miner/data-miner"
 if [ ! -f "$DATAMINER_BINARY" ]; then
     echo "🔨 Dataminer binary not found, building..."
-    cd "$PROJECT_ROOT/cmd/dataminer" && go build -o dataminer main.go
+    cd "$PROJECT_ROOT/cmd/data-miner" && go build -o data-miner main.go
 fi
 
 # Run the neural miner

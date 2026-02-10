@@ -9,9 +9,6 @@ import (
 	"data-encoder/pkg/mapper"
 	"data-encoder/pkg/schema"
 	"data-encoder/pkg/tokenizer"
-
-	"github.com/xitongsys/parquet-go-source/local"
-	"github.com/xitongsys/parquet-go/reader"
 )
 
 func TestParseFlags(t *testing.T) {

@@ -1,20 +1,20 @@
 #!/bin/bash
 
-# Script to kill all dataminer processes
+# Script to kill all data-miner processes
 
 set -e
 
-echo "🔍 Checking for running dataminer processes..."
+echo "🔍 Checking for running data-miner processes..."
 
-# Find dataminer PIDs
-PIDS=$(pgrep -f "dataminer" || true)
+# Find data-miner PIDs
+PIDS=$(pgrep -f "data-miner" || true)
 
 if [ -z "$PIDS" ]; then
-    echo "✅ No dataminer processes found running"
+    echo "✅ No data-miner processes found running"
     exit 0
 fi
 
-echo "⚠️  Found dataminer processes:"
+echo "⚠️  Found data-miner processes:"
 echo "$PIDS"
 echo ""
 
@@ -27,7 +27,7 @@ echo "⏳ Waiting 5 seconds for graceful shutdown..."
 sleep 5
 
 # Check if processes are still running
-STILL_RUNNING=$(pgrep -f "dataminer" || true)
+STILL_RUNNING=$(pgrep -f "data-miner" || true)
 
 if [ -n "$STILL_RUNNING" ]; then
     echo "⚠️  Processes still running, sending SIGKILL..."
@@ -35,7 +35,7 @@ if [ -n "$STILL_RUNNING" ]; then
     
     # Final check
     sleep 1
-    REMAINING=$(pgrep -f "dataminer" || true)
+    REMAINING=$(pgrep -f "data-miner" || true)
     
     if [ -n "$REMAINING" ]; then
         echo "❌ Failed to kill some processes:"
@@ -44,5 +44,5 @@ if [ -n "$STILL_RUNNING" ]; then
     fi
 fi
 
-echo "✅ All dataminer processes terminated successfully"
+echo "✅ All data-miner processes terminated successfully"
 exit 0

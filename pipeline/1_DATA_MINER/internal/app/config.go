@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"dataminer/internal/arxiv"
+	"data-miner/internal/arxiv"
 
 	"github.com/joho/godotenv"
 )
