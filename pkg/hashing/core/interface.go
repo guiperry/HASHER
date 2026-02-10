@@ -28,6 +28,16 @@ type HashMethod interface {
 
 	// GetCapabilities returns the capabilities and performance characteristics
 	GetCapabilities() *Capabilities
+
+	// Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
+	// This is the core mechanism for dynamic associative hashing
+	Execute21PassLoop(header []byte, targetTokenID uint32) (*JitterResult, error)
+
+	// LoadJitterTable loads associative memory for flash search jitter lookup
+	LoadJitterTable(table map[uint32]uint32) error
+
+	// GetJitterStats returns jitter-specific statistics
+	GetJitterStats() map[string]interface{}
 }
 
 // Capabilities describes the capabilities of a hashing method
@@ -46,6 +56,9 @@ type Capabilities struct {
 
 	// Whether this method is optimized for training
 	TrainingOptimized bool `json:"training_optimized"`
+
+	// Whether this method supports 21-pass temporal jitter
+	JitterSupported bool `json:"jitter_supported"`
 
 	// Maximum batch size for batch operations
 	MaxBatchSize int `json:"max_batch_size"`
@@ -109,4 +122,37 @@ type MiningResult struct {
 
 	// Which method was used
 	Method string `json:"method"`
+}
+
+// JitterResult represents the result of a 21-pass temporal loop operation
+type JitterResult struct {
+	// The discovered golden nonce
+	Nonce uint32 `json:"nonce"`
+
+	// Whether a valid golden nonce was found
+	Found bool `json:"found"`
+
+	// Final hash after 21 passes
+	FinalHash [32]byte `json:"final_hash"`
+
+	// Number of passes completed
+	PassesCompleted int `json:"passes_completed"`
+
+	// Stability score (consistency across passes)
+	Stability float64 `json:"stability"`
+
+	// Alignment score (how well final hash matches target)
+	Alignment float64 `json:"alignment"`
+
+	// All jitter vectors applied during the search
+	JitterVectors []uint32 `json:"jitter_vectors"`
+
+	// Time taken to complete the temporal loop (microseconds)
+	LatencyUs uint64 `json:"latency_us"`
+
+	// Which method was used
+	Method string `json:"method"`
+
+	// Additional metadata
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

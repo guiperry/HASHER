@@ -196,6 +196,23 @@ func (c *ASICClient) ComputeHash(data []byte) ([32]byte, error) {
 	return result, nil
 }
 
+// ComputeDoubleHash computes double SHA-256 using ASIC or software fallback
+func (c *ASICClient) ComputeDoubleHash(data []byte) ([32]byte, error) {
+	// First hash
+	first, err := c.ComputeHash(data)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("first hash failed: %w", err)
+	}
+
+	// Second hash
+	second, err := c.ComputeHash(first[:])
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("second hash failed: %w", err)
+	}
+
+	return second, nil
+}
+
 // ComputeBatch computes multiple SHA-256 hashes in a batch
 func (c *ASICClient) ComputeBatch(data [][]byte) ([][32]byte, error) {
 	c.mu.RLock()

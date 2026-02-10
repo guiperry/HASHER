@@ -51,10 +51,24 @@ func DefaultHashMethodConfig() *HashMethodConfig {
 func TrainingHashMethodConfig() *HashMethodConfig {
 	config := DefaultHashMethodConfig()
 	config.PreferredOrder = []string{
-		"cuda",     // 1. CUDA for training performance
-		"asic",     // 2. ASIC if available
+		"ubpf",     // 1. uBPF with jitter for training performance
+		"cuda",     // 2. CUDA for training performance
+		"asic",     // 3. ASIC if available
+		"software", // 4. Software fallback
+		"ebpf",     // 5. eBPF OpenWRT (future)
+	}
+	config.TrainingMode = true
+	return config
+}
+
+// JitterHashMethodConfig returns configuration optimized for jitter-enabled methods
+func JitterHashMethodConfig() *HashMethodConfig {
+	config := DefaultHashMethodConfig()
+	config.PreferredOrder = []string{
+		"ubpf",     // 1. uBPF with full jitter support
+		"cuda",     // 2. CUDA (if jitter support added)
 		"software", // 3. Software fallback
-		"ubpf",     // 4. uBPF simulation
+		"asic",     // 4. ASIC (limited jitter support)
 		"ebpf",     // 5. eBPF OpenWRT (future)
 	}
 	config.TrainingMode = true

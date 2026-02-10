@@ -22,6 +22,25 @@ func NewEbpfMethod() *EbpfMethod {
 	}
 }
 
+// Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
+func (m *EbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*core.JitterResult, error) {
+	return nil, fmt.Errorf("eBPF 21-pass loop not yet implemented - requires ASIC flash")
+}
+
+// LoadJitterTable loads associative memory for flash search jitter lookup
+func (m *EbpfMethod) LoadJitterTable(table map[uint32]uint32) error {
+	return fmt.Errorf("eBPF jitter table loading not yet implemented - requires ASIC flash")
+}
+
+// GetJitterStats returns jitter-specific statistics
+func (m *EbpfMethod) GetJitterStats() map[string]interface{} {
+	return map[string]interface{}{
+		"method":         m.Name(),
+		"jitter_enabled": false, // Not yet implemented
+		"status":         "future_implementation",
+	}
+}
+
 // Name returns the human-readable name of the hashing method
 func (m *EbpfMethod) Name() string {
 	return "eBPF OpenWRT Kernel (Future)"

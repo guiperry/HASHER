@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"hasher/pkg/hashing/core"
+	"hasher/pkg/hashing/jitter"
 )
 
 // ASICMethod implements the HashMethod interface for direct ASIC hardware hashing
@@ -167,6 +168,7 @@ func (m *ASICMethod) initializeCapabilities() {
 		HashRate:          hashRate,
 		ProductionReady:   productionReady,
 		TrainingOptimized: false, // ASIC is for production, not training
+		JitterSupported:   false, // ASIC does not support jitter
 		MaxBatchSize:      maxBatchSize,
 		AvgLatencyUs:      avgLatencyUs,
 		HardwareInfo: &core.HardwareInfo{
@@ -209,4 +211,98 @@ func (m *ASICMethod) Reconnect() error {
 // GetClient returns the underlying ASIC client for advanced operations
 func (m *ASICMethod) GetClient() *ASICClient {
 	return m.client
+}
+
+// Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
+func (m *ASICMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*core.JitterResult, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("ASIC client not initialized")
+	}
+
+	if len(header) != 80 {
+		return nil, fmt.Errorf("header must be exactly 80 bytes")
+	}
+
+	// Create jitter engine for this method
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+
+	// Set the hash method to use our ASIC implementation
+	jitterEngine.SetHashMethod(&ASICHASHMethod{client: m.client})
+
+	// Execute the 21-pass loop
+	result, err := jitterEngine.Execute21PassLoop(header, targetTokenID)
+	if err != nil {
+		return nil, fmt.Errorf("21-pass loop failed: %w", err)
+	}
+
+	// Convert jitter result to core result
+	jitterVectors := make([]uint32, len(result.JitterVectors))
+	for i, jv := range result.JitterVectors {
+		jitterVectors[i] = uint32(jv)
+	}
+
+	return &core.JitterResult{
+		Nonce:           result.Nonce,
+		Found:           result.Found,
+		FinalHash:       result.FinalHash,
+		PassesCompleted: result.PassesCompleted,
+		Stability:       result.Stability,
+		Alignment:       result.Alignment,
+		JitterVectors:   jitterVectors,
+		LatencyUs:       0, // TODO: Add timing
+		Method:          m.Name(),
+		Metadata:        result.Metadata,
+	}, nil
+}
+
+// LoadJitterTable loads associative memory for flash search jitter lookup
+func (m *ASICMethod) LoadJitterTable(table map[uint32]uint32) error {
+	// Convert uint32 to JitterVector
+	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
+	for k, v := range table {
+		jitterTable[k] = jitter.JitterVector(v)
+	}
+
+	// Store for use in Execute21PassLoop
+	// TODO: Store this in the method instance
+	return nil
+}
+
+// GetJitterStats returns jitter-specific statistics
+func (m *ASICMethod) GetJitterStats() map[string]interface{} {
+	stats := map[string]interface{}{
+		"method":            m.Name(),
+		"jitter_enabled":    true,
+		"jitter_table_size": 0, // TODO: Track actual table size
+	}
+
+	// Add ASIC-specific stats
+	if m.client != nil {
+		stats["asic_connected"] = m.client.IsConnected()
+		stats["using_fallback"] = m.client.useFallback
+	}
+
+	return stats
+}
+
+// ASICHASHMethod implements the jitter.HashMethod interface for ASIC
+type ASICHASHMethod struct {
+	client *ASICClient
+}
+
+// ComputeHash computes SHA-256 using ASIC hardware
+func (a *ASICHASHMethod) ComputeHash(data []byte) ([32]byte, error) {
+	if a.client == nil {
+		return [32]byte{}, fmt.Errorf("ASIC client not available")
+	}
+	return a.client.ComputeHash(data)
+}
+
+// ComputeDoubleHash computes double SHA-256 using ASIC hardware
+func (a *ASICHASHMethod) ComputeDoubleHash(data []byte) ([32]byte, error) {
+	if a.client == nil {
+		return [32]byte{}, fmt.Errorf("ASIC client not available")
+	}
+	return a.client.ComputeDoubleHash(data)
 }

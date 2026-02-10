@@ -193,3 +193,33 @@ func (m *CudaMethod) initializeCapabilities() {
 func (m *CudaMethod) GetBridge() *CudaBridge {
 	return m.bridge
 }
+
+// Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
+func (m *CudaMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*core.JitterResult, error) {
+	if m.bridge.GetDeviceCount() == 0 {
+		return nil, fmt.Errorf("CUDA method not available")
+	}
+
+	if len(header) != 80 {
+		return nil, fmt.Errorf("header must be exactly 80 bytes")
+	}
+
+	// For CUDA method, we'll use a simplified implementation
+	// In a full implementation, this would use GPU kernels for the 21-pass loop
+	return nil, fmt.Errorf("CUDA 21-pass loop not yet implemented")
+}
+
+// LoadJitterTable loads associative memory for flash search jitter lookup
+func (m *CudaMethod) LoadJitterTable(table map[uint32]uint32) error {
+	// TODO: Implement jitter table loading for CUDA
+	return fmt.Errorf("CUDA jitter table loading not yet implemented")
+}
+
+// GetJitterStats returns jitter-specific statistics
+func (m *CudaMethod) GetJitterStats() map[string]interface{} {
+	return map[string]interface{}{
+		"method":         m.Name(),
+		"jitter_enabled": false, // Not yet implemented
+		"cuda_available": m.bridge.GetDeviceCount() > 0,
+	}
+}

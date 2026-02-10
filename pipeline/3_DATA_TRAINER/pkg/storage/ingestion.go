@@ -24,11 +24,36 @@ const (
 )
 
 // ParquetTrainingRecord represents the structure in the Parquet file
+// Matches the TrainingFrame schema from 2_DATA_ENCODER
 type ParquetTrainingRecord struct {
-	TokenSequence []int32 `parquet:"name=token_sequence, type=LIST, convertedtype=LIST, scale=0"`
-	FeatureVector []int64 `parquet:"name=feature_vector, type=LIST, convertedtype=LIST, scale=0"`
-	TargetToken   int32   `parquet:"name=target_token, type=INT32"`
-	ContextHash   int64   `parquet:"name=context_hash, type=INT64"`
+	// Metadata
+	SourceFile string `parquet:"name=source_file, type=BYTE_ARRAY, convertedtype=UTF8"`
+	ChunkID    int32  `parquet:"name=chunk_id, type=INT32"`
+
+	// Window metadata
+	WindowStart   int32 `parquet:"name=window_start, type=INT32"`
+	WindowEnd     int32 `parquet:"name=window_end, type=INT32"`
+	ContextLength int32 `parquet:"name=context_length, type=INT32"`
+
+	// ASIC input slots (12 x 4 bytes = 48 bytes)
+	AsicSlots0  int32 `parquet:"name=asic_slot_0, type=INT32"`
+	AsicSlots1  int32 `parquet:"name=asic_slot_1, type=INT32"`
+	AsicSlots2  int32 `parquet:"name=asic_slot_2, type=INT32"`
+	AsicSlots3  int32 `parquet:"name=asic_slot_3, type=INT32"`
+	AsicSlots4  int32 `parquet:"name=asic_slot_4, type=INT32"`
+	AsicSlots5  int32 `parquet:"name=asic_slot_5, type=INT32"`
+	AsicSlots6  int32 `parquet:"name=asic_slot_6, type=INT32"`
+	AsicSlots7  int32 `parquet:"name=asic_slot_7, type=INT32"`
+	AsicSlots8  int32 `parquet:"name=asic_slot_8, type=INT32"`
+	AsicSlots9  int32 `parquet:"name=asic_slot_9, type=INT32"`
+	AsicSlots10 int32 `parquet:"name=asic_slot_10, type=INT32"`
+	AsicSlots11 int32 `parquet:"name=asic_slot_11, type=INT32"`
+
+	// Target
+	TargetTokenID int32 `parquet:"name=target_token_id, type=INT32"`
+
+	// Seed (placeholder for Stage 3)
+	BestSeed string `parquet:"name=best_seed, type=BYTE_ARRAY"`
 }
 
 type DataIngestor struct {
@@ -456,16 +481,15 @@ func (di *DataIngestor) readParquetFile(filePath string) ([]*training.TrainingRe
 
 func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *training.TrainingRecord {
 	record := &training.TrainingRecord{
-		TokenSequence: pr.TokenSequence,
-		TargetToken:   pr.TargetToken,
-		ContextHash:   uint32(pr.ContextHash),
+		TargetToken: pr.TargetTokenID,
+		ContextHash: uint32(pr.ChunkID), // Using ChunkID as context identifier
 	}
 
-	// Convert FeatureVector from []int64 to [12]uint32
-	if len(pr.FeatureVector) >= 12 {
-		for i := 0; i < 12; i++ {
-			record.FeatureVector[i] = uint32(pr.FeatureVector[i])
-		}
+	// Map ASIC slots to FeatureVector
+	record.FeatureVector = [12]uint32{
+		uint32(pr.AsicSlots0), uint32(pr.AsicSlots1), uint32(pr.AsicSlots2), uint32(pr.AsicSlots3),
+		uint32(pr.AsicSlots4), uint32(pr.AsicSlots5), uint32(pr.AsicSlots6), uint32(pr.AsicSlots7),
+		uint32(pr.AsicSlots8), uint32(pr.AsicSlots9), uint32(pr.AsicSlots10), uint32(pr.AsicSlots11),
 	}
 
 	// Validate record

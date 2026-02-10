@@ -10,6 +10,7 @@ import (
 
 	"hasher/pkg/hashing/core"
 	"hasher/pkg/hashing/hardware"
+	"hasher/pkg/hashing/jitter"
 )
 
 // UbpfMethod implements the HashMethod interface for uBPF-based hashing
@@ -304,7 +305,8 @@ func (m *UbpfMethod) initializeCapabilities() {
 		IsHardware:        isAvailable,
 		HashRate:          100000000, // 100 MH/s simulated
 		ProductionReady:   false,     // Simulation only
-		TrainingOptimized: false,
+		TrainingOptimized: true,      // Optimized for training with jitter
+		JitterSupported:   true,      // Full 21-pass jitter support
 		MaxBatchSize:      50,
 		AvgLatencyUs:      500, // 500 microseconds
 		HardwareInfo: &core.HardwareInfo{
@@ -315,4 +317,75 @@ func (m *UbpfMethod) initializeCapabilities() {
 			Metadata:       metadata,
 		},
 	}
+}
+
+// Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
+func (m *UbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*core.JitterResult, error) {
+	if !m.initialized {
+		return nil, fmt.Errorf("uBPF method not initialized")
+	}
+
+	if len(header) != 80 {
+		return nil, fmt.Errorf("header must be exactly 80 bytes")
+	}
+
+	// Use the uBPF VM's jitter engine
+	result, err := m.vm.Execute21PassLoop(header, targetTokenID)
+	if err != nil {
+		return nil, fmt.Errorf("21-pass loop failed: %w", err)
+	}
+
+	// Convert jitter result to core result
+	jitterVectors := make([]uint32, len(result.JitterVectors))
+	for i, jv := range result.JitterVectors {
+		jitterVectors[i] = uint32(jv)
+	}
+
+	return &core.JitterResult{
+		Nonce:           result.Nonce,
+		Found:           result.Found,
+		FinalHash:       result.FinalHash,
+		PassesCompleted: result.PassesCompleted,
+		Stability:       result.Stability,
+		Alignment:       result.Alignment,
+		JitterVectors:   jitterVectors,
+		LatencyUs:       0, // TODO: Add timing
+		Method:          m.Name(),
+		Metadata:        result.Metadata,
+	}, nil
+}
+
+// LoadJitterTable loads associative memory for jitter lookup
+func (m *UbpfMethod) LoadJitterTable(table map[uint32]uint32) error {
+	if !m.initialized {
+		return fmt.Errorf("uBPF method not initialized")
+	}
+
+	// Convert uint32 to JitterVector
+	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
+	for k, v := range table {
+		jitterTable[k] = jitter.JitterVector(v)
+	}
+
+	// Load into the jitter engine
+	m.vm.LoadJitterTable(jitterTable)
+	return nil
+}
+
+// GetJitterStats returns jitter-specific statistics
+func (m *UbpfMethod) GetJitterStats() map[string]interface{} {
+	if !m.initialized {
+		return map[string]interface{}{"initialized": false}
+	}
+
+	// Get statistics from the uBPF VM
+	stats := m.vm.GetStats()
+
+	// Add method-specific information
+	stats["method"] = m.Name()
+	stats["device_path"] = m.devicePath
+	stats["cgminer_path"] = m.cgminerPath
+	stats["cgminer_api"] = m.cgminerAPI
+
+	return stats
 }

@@ -1,9 +1,12 @@
 package ubpf
 
 /*
+#cgo CFLAGS: -I. -std=c11
+#cgo LDFLAGS:
 #include <stdlib.h>
-#include <memory.h>
+#include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 
 // Neural frame structure for eBPF communication
 struct neural_frame {
@@ -18,6 +21,11 @@ struct seed_result {
 	uint32_t match_found;
 	uint32_t reward_metadata[6];
 };
+
+// Explicit declarations for CGo
+extern void* malloc(size_t);
+extern void free(void*);
+extern void* memcpy(void*, const void*, size_t);
 */
 import "C"
 
@@ -27,6 +35,7 @@ import (
 	"unsafe"
 
 	"hasher/pkg/hashing/hardware"
+	"hasher/pkg/hashing/jitter"
 )
 
 // uBPFVM provides userspace BPF execution capabilities
@@ -34,6 +43,12 @@ import (
 type uBPFVM struct {
 	vm     unsafe.Pointer
 	loaded bool
+
+	// Jitter engine for 21-pass temporal loop
+	jitterEngine *jitter.JitterEngine
+
+	// Helper adapter for BPF helper functions
+	helperAdapter *jitter.UBPFHelperAdapter
 }
 
 // Frame represents the neural frame data sent to eBPF
@@ -54,8 +69,13 @@ type Result struct {
 func NewuBPFVM() *uBPFVM {
 	// In a real implementation, this would initialize the uBPF library
 	// For now, we'll create a simulation wrapper
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+
 	return &uBPFVM{
-		loaded: false,
+		loaded:        false,
+		jitterEngine:  jitterEngine,
+		helperAdapter: jitter.NewUBPFHelperAdapter(jitterEngine),
 	}
 }
 
@@ -98,14 +118,14 @@ func (vm *uBPFVM) ExecuteFrame(frame *Frame) (*Result, error) {
 		cFrame.padding[i] = C.uint32_t(0)
 	}
 
-	// Execute eBPF program
+	// Execute eBPF program with jitter support
 	// In real implementation, this would call ubpf_exec()
-	result := vm.executeInternal(&cFrame)
+	result := vm.executeInternalWithJitter(&cFrame)
 
 	return result, nil
 }
 
-// executeInternal simulates eBPF execution and Bitcoin mining
+// executeInternal simulates eBPF execution and Bitcoin mining (legacy)
 func (vm *uBPFVM) executeInternal(frame *C.struct_neural_frame) *Result {
 	// Simulate Bitcoin mining process
 	result := &Result{}
@@ -147,6 +167,62 @@ func (vm *uBPFVM) executeInternal(frame *C.struct_neural_frame) *Result {
 	result.BestSeed = 0
 	result.MatchFound = 0
 	result.RewardMetadata[5] = 0 // Failure
+
+	return result
+}
+
+// executeInternalWithJitter simulates eBPF execution with 21-pass jitter mechanism
+func (vm *uBPFVM) executeInternalWithJitter(frame *C.struct_neural_frame) *Result {
+	// Convert slots from eBPF format to Go format
+	var slots [12]uint32
+	for i := 0; i < 12; i++ {
+		// Convert from Big-Endian to Little-Endian for internal processing
+		slotBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(slotBytes, uint32(frame.slots[i]))
+		slots[i] = binary.BigEndian.Uint32(slotBytes)
+	}
+
+	// Create hardware prep
+	hwPrep := hardware.NewHardwarePrep(false)
+
+	// Build initial Bitcoin header (nonce will be set during search)
+	header := hwPrep.PrepareAsicJob(slots, 0)
+
+	// Execute 21-pass temporal loop with jitter
+	targetTokenID := uint32(frame.target_token_id)
+	goldenResult, err := vm.jitterEngine.Execute21PassLoop(header, targetTokenID)
+	if err != nil {
+		// Fallback to legacy mining if jitter fails
+		fmt.Printf("Jitter engine failed, falling back to legacy mining: %v\n", err)
+		return vm.executeInternal(frame)
+	}
+
+	// Convert jitter result to eBPF result format
+	result := &Result{
+		BestSeed:   goldenResult.Nonce,
+		MatchFound: 0,
+	}
+
+	if goldenResult.Found {
+		result.MatchFound = 1
+		result.RewardMetadata[0] = goldenResult.Nonce
+		result.RewardMetadata[1] = uint32(goldenResult.Alignment * 1000) // Scale for storage
+		result.RewardMetadata[2] = uint32(goldenResult.Stability * 1000)
+		result.RewardMetadata[3] = uint32(goldenResult.PassesCompleted)
+		result.RewardMetadata[4] = uint32(len(goldenResult.JitterVectors))
+
+		fmt.Printf("Golden nonce found via jitter: %d (alignment: %.3f, stability: %.3f)\n",
+			goldenResult.Nonce, goldenResult.Alignment, goldenResult.Stability)
+	} else {
+		// No perfect match found, but we still have a best candidate
+		result.MatchFound = 0
+		result.RewardMetadata[0] = goldenResult.Nonce
+		result.RewardMetadata[1] = uint32(goldenResult.Alignment * 1000)
+		result.RewardMetadata[5] = 0 // Failure to find perfect match
+
+		fmt.Printf("Best candidate via jitter: %d (alignment: %.3f, stability: %.3f)\n",
+			goldenResult.Nonce, goldenResult.Alignment, goldenResult.Stability)
+	}
 
 	return result
 }
@@ -201,7 +277,38 @@ func (vm *uBPFVM) Close() error {
 		vm.vm = nil
 	}
 	vm.loaded = false
+
+	// Reset jitter engine
+	if vm.jitterEngine != nil {
+		vm.jitterEngine.Reset()
+	}
+
 	return nil
+}
+
+// GetJitterEngine returns the jitter engine for external access
+func (vm *uBPFVM) GetJitterEngine() *jitter.JitterEngine {
+	return vm.jitterEngine
+}
+
+// GetHelperAdapter returns the helper adapter for BPF integration
+func (vm *uBPFVM) GetHelperAdapter() *jitter.UBPFHelperAdapter {
+	return vm.helperAdapter
+}
+
+// Execute21PassLoop directly executes the 21-pass temporal loop
+// This provides a high-level interface for the jitter mechanism
+func (vm *uBPFVM) Execute21PassLoop(header []byte, targetTokenID uint32) (*jitter.GoldenNonceResult, error) {
+	if !vm.loaded {
+		return nil, fmt.Errorf("eBPF not loaded")
+	}
+
+	return vm.jitterEngine.Execute21PassLoop(header, targetTokenID)
+}
+
+// LoadJitterTable loads a jitter table into the engine
+func (vm *uBPFVM) LoadJitterTable(table map[uint32]jitter.JitterVector) {
+	vm.jitterEngine.GetSearcher().LoadJitterTable(table)
 }
 
 // GetStats returns VM statistics
@@ -210,9 +317,15 @@ func (vm *uBPFVM) GetStats() map[string]interface{} {
 		return map[string]interface{}{"loaded": false}
 	}
 
+	// Get jitter engine statistics
+	jitterStats := vm.jitterEngine.GetStatistics()
+
 	return map[string]interface{}{
-		"loaded":  true,
-		"maps":    2, // frame_map, result_map
-		"program": "neural_kernel",
+		"loaded":         true,
+		"maps":           2, // frame_map, result_map
+		"program":        "neural_kernel",
+		"jitter_enabled": true,
+		"jitter_stats":   jitterStats,
+		"helpers":        vm.helperAdapter.GetHelperCount(),
 	}
 }

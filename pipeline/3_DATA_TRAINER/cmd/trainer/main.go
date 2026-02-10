@@ -6,9 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/bits"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -22,11 +25,13 @@ import (
 )
 
 var (
-	configFile = flag.String("config", "", "Path to configuration file")
-	dataPath   = flag.String("data", "data", "Path to data directory")
-	maxEpochs  = flag.Int("epochs", 10, "Maximum number of training epochs")
-	population = flag.Int("population", 32, "Population size for evolution")
-	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
+	configFile     = flag.String("config", "", "Path to configuration file")
+	dataPath       = flag.String("data", "data", "Path to data directory")
+	maxEpochs      = flag.Int("epochs", 10, "Maximum number of training epochs")
+	population     = flag.Int("population", 256, "Population size for evolution")
+	maxGenerations = flag.Int("generations", 20000, "Maximum number of generations")
+	difficultyBits = flag.Int("difficulty-bits", 16, "Number of leading bits that must match (8-32)")
+	verbose        = flag.Bool("verbose", false, "Enable verbose logging")
 )
 
 type TrainingOrchestrator struct {
@@ -39,6 +44,7 @@ type TrainingOrchestrator struct {
 	checkpointMgr *storage.CheckpointManager
 	dataIngestor  *storage.DataIngestor
 	trainingData  []*training.TrainingRecord
+	seedWriter    *storage.SeedWriter
 }
 
 // ingestionLogger wraps the internal logging.Logger to implement storage.IngestionLogger
@@ -60,6 +66,55 @@ func (il *ingestionLogger) Warn(format string, args ...interface{}) {
 
 func (il *ingestionLogger) Error(format string, args ...interface{}) {
 	il.logger.Error(format, args...)
+}
+
+// getAppDataDir returns the OS-specific application data directory
+func getAppDataDir() (string, error) {
+	var basePath string
+
+	if runtime.GOOS == "windows" {
+		// Windows: %APPDATA% or %LOCALAPPDATA%
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			basePath = localAppData
+		} else if appData := os.Getenv("APPDATA"); appData != "" {
+			basePath = appData
+		} else {
+			// Fallback to user profile
+			userProfile := os.Getenv("USERPROFILE")
+			if userProfile == "" {
+				currentUser, err := user.Current()
+				if err != nil {
+					return "", fmt.Errorf("failed to get current user: %w", err)
+				}
+				userProfile = currentUser.HomeDir
+			}
+			basePath = filepath.Join(userProfile, "AppData", "Local")
+		}
+		basePath = filepath.Join(basePath, "Hasher", "DataTrainer")
+	} else {
+		// Unix-like systems: ~/.local/share
+		home := os.Getenv("HOME")
+		if home == "" {
+			currentUser, err := user.Current()
+			if err != nil {
+				return "", fmt.Errorf("failed to get current user: %w", err)
+			}
+			home = currentUser.HomeDir
+		}
+
+		dataHome := os.Getenv("XDG_DATA_HOME")
+		if dataHome == "" {
+			dataHome = filepath.Join(home, ".local", "share")
+		}
+		basePath = filepath.Join(dataHome, "hasher", "data-trainer")
+	}
+
+	// Create the directory if it doesn't exist
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return "", fmt.Errorf("failed to create app data directory: %w", err)
+	}
+
+	return basePath, nil
 }
 
 func main() {
@@ -121,23 +176,31 @@ func NewTrainingOrchestrator(logger *logging.Logger) (*TrainingOrchestrator, err
 }
 
 func (to *TrainingOrchestrator) initializeComponents() error {
+	// Get OS-specific application data directory
+	appDataDir, err := getAppDataDir()
+	if err != nil {
+		return fmt.Errorf("failed to get app data directory: %w", err)
+	}
+	to.logger.Info("Using app data directory: %s", appDataDir)
+
 	to.logger.Info("Initializing simulator...")
 	simConfig := &simulator.SimulatorConfig{
-		DeviceType:     "vhasher",
+		DeviceType:     "hasher",
 		MaxConcurrency: 100,
 		TargetHashRate: 500000000,
 		CacheSize:      10000,
 		GPUDevice:      0,
 		Timeout:        30,
 	}
-	sim := simulator.NewvHasherSimulator(simConfig)
+	// Use the new HasherWrapper which implements HashSimulator using hasher's HashMethod
+	sim := simulator.NewHasherWrapper(simConfig)
 	if err := sim.Initialize(simConfig); err != nil {
 		return fmt.Errorf("failed to initialize simulator: %w", err)
 	}
 	to.simulator = sim
 
 	to.logger.Info("Initializing storage...")
-	storagePath := filepath.Join(*dataPath, "weights")
+	storagePath := filepath.Join(appDataDir, "weights")
 	csvStorage := storage.NewCSVStorage(storagePath, 1000)
 	if err := csvStorage.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize storage: %w", err)
@@ -145,7 +208,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	to.storage = csvStorage
 
 	to.logger.Info("Initializing checkpoint manager...")
-	checkpointPath := filepath.Join(*dataPath, "checkpoints")
+	checkpointPath := filepath.Join(appDataDir, "checkpoints")
 	if err := os.MkdirAll(checkpointPath, 0755); err != nil {
 		return fmt.Errorf("failed to create checkpoint directory: %w", err)
 	}
@@ -168,6 +231,10 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	dataIngestor.SetCheckpointManager(to.checkpointMgr)
 	dataIngestor.SetChunkSize(1000) // Process 1000 records at a time
 	to.dataIngestor = dataIngestor
+
+	to.logger.Info("Initializing seed writer for write-back...")
+	seedWriter := storage.NewSeedWriter(trainingDataPath)
+	to.seedWriter = seedWriter
 
 	trainingRecords, err := dataIngestor.ProcessAllFiles(nil)
 	if err != nil {
@@ -194,6 +261,12 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 
 	to.logger.Info("Initializing evolutionary harness...")
 	harness := training.NewEvolutionaryHarness(*population)
+	// Set difficulty mask based on requested bit count
+	if *difficultyBits >= 8 && *difficultyBits <= 32 {
+		mask := uint32(0xFFFFFFFF) << (32 - *difficultyBits)
+		harness.SetDifficultyMask(mask)
+		to.logger.Info("Difficulty set to %d bits (mask: 0x%08X)", *difficultyBits, mask)
+	}
 	to.harness = harness
 
 	to.logger.Info("Initializing validator...")
@@ -218,7 +291,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 		RetryDelay:        5 * time.Second,
 		ValidationMode:    "strict",
 		BackupEnabled:     true,
-		BackupPath:        filepath.Join(*dataPath, "backups"),
+		BackupPath:        filepath.Join(appDataDir, "backups"),
 		RollbackEnabled:   true,
 	}
 	flashManager := deployment.NewFlashManager(csvStorage, flashConfig)
@@ -351,31 +424,51 @@ func (to *TrainingOrchestrator) trainBatch(ctx context.Context, records []*train
 
 func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *training.TrainingRecord) error {
 	contextHash := training.ComputeContextHash(record.TokenSequence, 5)
-	population := training.NewSeedPopulation(record.TargetToken, contextHash, 32)
+	pop := training.NewSeedPopulation(record.TargetToken, contextHash, *population)
 
 	tokenMap := map[int32]bool{record.TargetToken: true}
 
-	for gen := 0; gen < 20; gen++ { // Reduced generations for batch processing
-		results, err := to.harness.EvaluatePopulation(population, record.TargetToken, tokenMap, to.simulator)
+	for gen := 0; gen < *maxGenerations; gen++ {
+		results, err := to.harness.EvaluatePopulation(pop, record, tokenMap, to.simulator)
 		if err != nil {
 			return fmt.Errorf("failed to evaluate population: %w", err)
 		}
 
 		eliteSeeds := to.harness.GetEliteSeeds(results)
-		if len(eliteSeeds) > 0 && eliteSeeds[0].Advantage > 0.5 {
-			to.logger.Debug("Found winning seed for token %d in generation %d", record.TargetToken, gen)
-			return to.saveWinningSeed(record.TargetToken, eliteSeeds[0], gen)
+		// Check for winning seed using difficulty mask (partial match) or high advantage
+		if len(eliteSeeds) > 0 {
+			bestSeed := eliteSeeds[0]
+			// Winning condition: passes difficulty mask OR has very high advantage
+			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(record.TargetToken)) {
+				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", record.TargetToken, gen)
+				return to.saveWinningSeed(record.TargetToken, bestSeed, gen)
+			}
+			// Also accept if advantage is very high AND meets a minimum quality threshold
+			if bestSeed.Advantage > 2.0 {
+				diff := bestSeed.HashOutput ^ uint32(record.TargetToken)
+				matchingBits := bits.LeadingZeros32(diff)
+				if matchingBits >= 16 { // Require at least 16 bits of similarity for a high-advantage win
+					to.logger.Info("[WIN] Token %d: Found winning seed in gen %d (high advantage=%.2f, %d bits)", record.TargetToken, gen, bestSeed.Advantage, matchingBits)
+					return to.saveWinningSeed(record.TargetToken, bestSeed, gen)
+				}
+			}
 		}
 
-		population.Seeds = to.harness.SelectAndMutate(results, population.Seeds)
-		population.Generation++
+		pop.Seeds = to.harness.SelectAndMutate(results, pop.Seeds)
+		pop.Generation++
+		to.harness.Generation = gen
 
-		if gen%10 == 0 {
-			to.logger.Debug("Token %d generation %d: fitness=%.4f", record.TargetToken, gen, population.Fitness)
+		if gen%50 == 0 {
+			bestMatch := 0
+			if len(eliteSeeds) > 0 {
+				diff := eliteSeeds[0].HashOutput ^ uint32(record.TargetToken)
+				bestMatch = bits.LeadingZeros32(diff)
+			}
+			to.logger.Debug("Token %d gen %d: fitness=%.4f, best_match=%d bits", record.TargetToken, gen, pop.Fitness, bestMatch)
 		}
 	}
 
-	to.logger.Warn("Failed to find winning seed for token %d after 20 generations", record.TargetToken)
+	to.logger.Warn("Token %d: No 16-bit match after %d generations (try increasing -generations)", record.TargetToken, *maxGenerations)
 	return nil
 }
 
@@ -391,33 +484,62 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 	}
 
 	contextHash := training.ComputeContextHash([]int32{targetToken}, 5)
-	population := training.NewSeedPopulation(targetToken, contextHash, *population)
+	pop := training.NewSeedPopulation(targetToken, contextHash, *population)
 
-	for gen := 0; gen < 50; gen++ {
-		results, err := to.harness.EvaluatePopulation(population, targetToken, tokenMap, to.simulator)
+	// Create a TrainingRecord for the targetToken
+	record := &training.TrainingRecord{
+		TargetToken:   targetToken,
+		TokenSequence: []int32{targetToken},
+		ContextHash:   training.ComputeContextHash([]int32{targetToken}, 5),
+		FeatureVector: [12]uint32{}, // Initialize with zeros
+	}
+
+	for gen := 0; gen < *maxGenerations; gen++ {
+		results, err := to.harness.EvaluatePopulation(pop, record, tokenMap, to.simulator)
 		if err != nil {
 			return fmt.Errorf("failed to evaluate population: %w", err)
 		}
 
 		eliteSeeds := to.harness.GetEliteSeeds(results)
-		if len(eliteSeeds) > 0 && eliteSeeds[0].Advantage > 1.0 {
-			to.logger.Debug("Found winning seed for token %d in generation %d", targetToken, gen)
-			return to.saveWinningSeed(targetToken, eliteSeeds[0], gen)
+		// Check for winning seed using difficulty mask (partial match) or high advantage
+		if len(eliteSeeds) > 0 {
+			bestSeed := eliteSeeds[0]
+			// Winning condition: passes difficulty mask OR has very high advantage
+			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(targetToken)) {
+				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", targetToken, gen)
+				return to.saveWinningSeed(targetToken, bestSeed, gen)
+			}
+			// Also accept if advantage is very high (converged solution)
+			if bestSeed.Advantage > 2.0 {
+				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (high advantage=%.2f)", targetToken, gen, bestSeed.Advantage)
+				return to.saveWinningSeed(targetToken, bestSeed, gen)
+			}
 		}
 
-		population.Seeds = to.harness.SelectAndMutate(results, population.Seeds)
-		population.Generation++
+		pop.Seeds = to.harness.SelectAndMutate(results, pop.Seeds)
+		pop.Generation++
+		to.harness.Generation = gen
 
-		if gen%25 == 0 {
-			to.logger.Debug("Token %d generation %d: fitness=%.4f", targetToken, gen, population.Fitness)
+		if gen%50 == 0 {
+			bestMatch := 0
+			if len(eliteSeeds) > 0 {
+				diff := eliteSeeds[0].HashOutput ^ uint32(targetToken)
+				bestMatch = bits.LeadingZeros32(diff)
+			}
+			to.logger.Debug("Token %d gen %d: fitness=%.4f, best_match=%d bits", targetToken, gen, pop.Fitness, bestMatch)
 		}
 	}
 
-	to.logger.Warn("Failed to find winning seed for token %d after 50 generations", targetToken)
+	to.logger.Warn("Token %d: No 16-bit match after %d generations (try increasing -generations)", targetToken, *maxGenerations)
 	return nil
 }
 
 func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training.SeedResult, generation int) error {
+	to.logger.Debug("Saving winning seed for token %d with length %d", targetToken, len(seed.Seed))
+	if len(seed.Seed) == 0 {
+		to.logger.Warn("Attempting to save an empty seed for token %d!", targetToken)
+	}
+
 	weightRecord := storage.WeightRecord{
 		TokenID:      targetToken,
 		BestSeed:     seed.Seed,
@@ -443,6 +565,13 @@ func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training
 		return fmt.Errorf("failed to save checkpoint: %w", err)
 	}
 
+	// Queue the best seed for write-back to source training_frames.parquet
+	if err := to.seedWriter.AddSeedWrite(targetToken, seed.Seed); err != nil {
+		to.logger.Warn("Failed to queue seed write-back for token %d: %v", targetToken, err)
+	} else {
+		to.logger.Debug("Queued seed write-back for token %d", targetToken)
+	}
+
 	to.logger.Info("Saved winning seed for token %d (fitness=%.4f)", targetToken, seed.Reward)
 	return nil
 }
@@ -456,11 +585,35 @@ func (to *TrainingOrchestrator) saveProgress(epoch int) error {
 	to.logger.Info("Progress checkpoint at epoch %d: %d tokens, avg_fitness=%.4f",
 		epoch, summary.TotalTokens, summary.AverageFitness)
 
+	// Write back pending seeds every 2 epochs
+	if epoch%2 == 0 {
+		pendingCount := to.seedWriter.GetPendingWriteCount()
+		if pendingCount > 0 {
+			to.logger.Info("Writing back %d pending best seeds to training_frames.parquet", pendingCount)
+			if err := to.seedWriter.WriteBack(); err != nil {
+				to.logger.Error("Failed to write back seeds: %v", err)
+				return err
+			}
+			to.logger.Info("Successfully wrote back best seeds to %s", to.seedWriter.GetSourceFile())
+		}
+	}
+
 	return nil
 }
 
 func (to *TrainingOrchestrator) finalizeTraining() error {
 	to.logger.Info("Finalizing training...")
+
+	// Final write-back of any remaining pending seeds
+	pendingCount := to.seedWriter.GetPendingWriteCount()
+	if pendingCount > 0 {
+		to.logger.Info("Final write-back of %d remaining best seeds to training_frames.parquet", pendingCount)
+		if err := to.seedWriter.WriteBack(); err != nil {
+			to.logger.Error("Failed to write back final seeds: %v", err)
+			return err
+		}
+		to.logger.Info("Successfully wrote back final best seeds to %s", to.seedWriter.GetSourceFile())
+	}
 
 	layers, err := to.storage.ListLayers()
 	if err != nil {
@@ -515,11 +668,11 @@ func loadConfig(filename string) (*config.Config, error) {
 			LayerSize: 1000,
 		},
 		Training: &config.TrainingConfig{
-			PopulationSize:  128,
+			PopulationSize:  256,
 			MaxGenerations:  500,
 			EliteRatio:      0.25,
 			MutationRate:    0.05,
-			TargetFitness:   0.95,
+			TargetFitness:   0.80,
 			ValidationSplit: 0.1,
 		},
 		Deployment: &config.DeploymentConfig{

@@ -24,7 +24,7 @@ CLANG=clang
 LLVM_STRIP=llvm-strip
 
 
-.PHONY: all build clean test proto ebpf deps help build-asic-test build-probe build-probe build-probe-v2 build-protocol-discover build-monitor build-diagnostics deploy deploy-probe deploy-probe-v2 deploy-protocol-discover deploy-monitor deploy-diagnostics cli test-cli build-all build-server-mips build-host build-host-all embed-binaries build-crypto-transformer train-crypto-transformer run-crypto-transformer build-simple-hash run-simple-hash
+.PHONY: all build clean test proto ebpf deps help build-asic-test build-probe build-probe build-probe-v2 build-protocol-discover build-monitor build-diagnostics deploy deploy-probe deploy-probe-v2 deploy-protocol-discover deploy-monitor deploy-diagnostics cli test-cli build-all build-server-mips build-host build-host-all embed-binaries build-crypto-transformer train-crypto-transformer run-crypto-transformer build-simple-hash run-simple-hash build-pipeline-all build-dataminer build-data-encoder build-data-trainer
 
 ANTMINER_IP ?= $(shell [ -f .env ] && source .env && echo $$DEVICE_IP || echo 192.168.12.151)
 ANTMINER_USER ?= root
@@ -312,12 +312,44 @@ build-driver: embed-host-server-mips build-host
 embed-binaries: build-driver
 	@echo "🔨 Copying binaries to CLI embed directory..."
 	@cp $(BIN_DIR)/hasher-host $(EMBED_DIR)/
-	@cp $(BIN_DIR)/hasher-server-mips $(EMBED_DIR)/
+	@cp $(BIN_DIR)/hasher-server-mips internal/host/embedded/hasher-server-mips
 	@echo "✅ Build complete: $(BIN_DIR)/"
+
+# ============================================================================
+# Pipeline binaries build targets
+# ============================================================================
+
+PIPELINE_DIR := pipeline
+
+## build-pipeline: Build all pipeline binaries
+define build-pipeline-binary
+	@echo "🔨 Building $(1) from $(2)..."
+	@mkdir -p $(EMBED_DIR)
+	cd $(PIPELINE_DIR)/$(2) && go build -ldflags "-s -w" -o ../../../$(EMBED_DIR)/$(1) $(3)
+	@echo "✅ Built: $(EMBED_DIR)/$(1)"
+endef
+
+## build-dataminer: Build data miner pipeline binary
+build-dataminer:
+	$(call build-pipeline-binary,dataminer,1_DATA_MINER,./cmd/dataminer)
+
+## build-data-encoder: Build data encoder pipeline binary
+build-data-encoder:
+	$(call build-pipeline-binary,data-encoder,2_DATA_ENCODER,.)
+
+## build-data-trainer: Build data trainer pipeline binary
+build-data-trainer:
+	$(call build-pipeline-binary,data-trainer,3_DATA_TRAINER,./cmd/trainer)
+
+## build-pipeline-all: Build all pipeline binaries
+build-pipeline-all: build-dataminer build-data-encoder build-data-trainer
+	@echo "✅ All pipeline binaries built"
+	@echo "📦 Pipeline binaries in: $(EMBED_DIR)"
+	@ls -lh $(EMBED_DIR)/
 
 
 ## build: Build all components
-build: generate build-driver cli
+build: generate build-driver build-pipeline-all cli
 	@echo "✅ All components built"
 
 ## test-training: Test training functionality

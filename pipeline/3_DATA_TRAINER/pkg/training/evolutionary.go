@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	mathrand "math/rand"
 	"sort"
 	"time"
@@ -125,13 +126,14 @@ func (tr *TrainingRecord) BuildHeaderBatch(nonces []uint32) [][]byte {
 }
 
 type SeedResult struct {
-	SeedID    uint32  `json:"seed_id"`
-	Seed      []byte  `json:"seed"`
-	Reward    float64 `json:"reward"`
-	Advantage float64 `json:"advantage"`
-	Alignment float64 `json:"alignment"`
-	Stability float64 `json:"stability"`
-	Format    float64 `json:"format"`
+	SeedID     uint32  `json:"seed_id"`
+	Seed       []byte  `json:"seed"`
+	HashOutput uint32  `json:"hash_output"` // Store the actual hash for bit-matching
+	Reward     float64 `json:"reward"`
+	Advantage  float64 `json:"advantage"`
+	Alignment  float64 `json:"alignment"`
+	Stability  float64 `json:"stability"`
+	Format     float64 `json:"format"`
 }
 
 type SeedPopulation struct {
@@ -252,21 +254,20 @@ func (sp *SeedPopulation) GetSeedIDs() []uint32 {
 }
 
 func (tr *TrainingRecord) Validate() bool {
-	if len(tr.TokenSequence) == 0 {
-		return false
-	}
+	// TokenSequence is optional (not present in Stage 2 output)
+	// Only validate if present
+
 	if tr.TargetToken <= 0 {
 		return false
 	}
-	if tr.FeatureVector != [12]uint32{} {
-		for _, v := range tr.FeatureVector {
-			if v == 0 {
-				return false
-			}
-		}
-		return true
+
+	// Check if FeatureVector is all zeros
+	if tr.FeatureVector == [12]uint32{} {
+		return false
 	}
-	return false
+
+	// Allow zeros in FeatureVector - they are valid ASIC slot values
+	return true
 }
 
 func GenerateRandomSeed() []byte {
@@ -288,6 +289,9 @@ type EvolutionaryHarness struct {
 	MutationRate   float64
 	RewardCalc     *RewardCalculator
 	rand           *mathrand.Rand
+	DifficultyMask uint32 // For partial difficulty validation (e.g., 0xFFFF0000 for 16-bit match)
+	StaticMidstate bool   // Freeze jitter for first N generations
+	Generation     int    // Track current generation for midstate logic
 }
 
 func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
@@ -301,8 +305,21 @@ func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
 			StabilityWeight: 0.3,
 			FormatWeight:    0.1,
 		},
-		rand: mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
+		rand:           mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
+		DifficultyMask: 0xFFFF0000, // Require 16-bit prefix match by default
+		StaticMidstate: true,
+		Generation:     0,
 	}
+}
+
+// SetDifficultyMask sets the difficulty mask for partial validation
+func (eh *EvolutionaryHarness) SetDifficultyMask(mask uint32) {
+	eh.DifficultyMask = mask
+}
+
+// IsWinningSeed checks if hash matches target within difficulty mask
+func (eh *EvolutionaryHarness) IsWinningSeed(hash uint32, target uint32) bool {
+	return (hash & eh.DifficultyMask) == (target & eh.DifficultyMask)
 }
 
 func (eh *EvolutionaryHarness) calculateAlignmentReward(goldenNonce uint32, targetToken int32, tokenMap map[int32]bool) float64 {
@@ -311,17 +328,26 @@ func (eh *EvolutionaryHarness) calculateAlignmentReward(goldenNonce uint32, targ
 		return 1.0
 	}
 
-	// Partial match or related token gets partial reward
-	if tokenMap[int32(goldenNonce)] {
-		// Check if it's in the same semantic range (simple heuristic)
-		diff := int32(targetToken) - int32(goldenNonce)
-		if diff >= -100 && diff <= 100 {
-			return 0.7 // Close semantic match
-		}
-		return 0.3 // Same token map but different range
+	// Prefix matching: reward based on leading bits that match (like ASIC difficulty)
+	// XOR gives us the bits that differ, LeadingZeros32 tells us how many MSBs match
+	diff := goldenNonce ^ uint32(targetToken)
+	matchingBits := bits.LeadingZeros32(diff)
+
+	// Exponential reward for matching more bits
+	// 0 matching bits = 0 reward, 32 matching bits = 1.0 reward
+	if matchingBits >= 16 {
+		// Strong prefix match (16+ bits) - high reward
+		return 0.5 + 0.5*float64(matchingBits-16)/16.0
+	} else if matchingBits >= 8 {
+		// Moderate prefix match (8-15 bits) - medium reward
+		return 0.2 + 0.3*float64(matchingBits-8)/8.0
+	} else if matchingBits >= 4 {
+		// Weak prefix match (4-7 bits) - small reward
+		return 0.05 + 0.15*float64(matchingBits-4)/4.0
 	}
 
-	return 0.0
+	// Minimal or no prefix match - tiny reward to encourage exploration
+	return 0.01 * float64(matchingBits) / 4.0
 }
 
 func (eh *EvolutionaryHarness) calculateFormatReward(goldenNonce uint32, tokenToken int32, tokenMap map[int32]bool) float64 {
@@ -430,6 +456,7 @@ func (eh *EvolutionaryHarness) CalculateReward(seed []byte, targetToken int32, t
 		exactMatchBonus = 0.5 // Significant bonus for exact match
 	}
 
+	result.HashOutput = goldenNonce // Store hash for bit-matching
 	result.Alignment = alignmentReward
 	result.Stability = stabilityReward
 	result.Format = formatReward
@@ -438,6 +465,51 @@ func (eh *EvolutionaryHarness) CalculateReward(seed []byte, targetToken int32, t
 	return result, nil
 }
 
+// CalculateBitMatchAdvantage calculates advantage based on bit-match scores (GRPO style)
+// This provides a gradient for evolution to follow despite SHA-256 avalanche effect
+func (eh *EvolutionaryHarness) CalculateBitMatchAdvantage(results []SeedResult, targetToken int32) []SeedResult {
+	if len(results) == 0 {
+		return results
+	}
+
+	// Calculate bit-match scores for each result
+	bitScores := make([]float64, len(results))
+	var totalScore float64
+
+	for i, res := range results {
+		// Count leading bits that match the target
+		diff := res.HashOutput ^ uint32(targetToken)
+		matchingBits := bits.LeadingZeros32(diff)
+		// Normalize to 0-1 range
+		bitScores[i] = float64(matchingBits) / 32.0
+		totalScore += bitScores[i]
+	}
+
+	mean := totalScore / float64(len(results))
+
+	var varianceSum float64
+	for _, score := range bitScores {
+		varianceSum += math.Pow(score-mean, 2)
+	}
+	stdDev := math.Sqrt(varianceSum / float64(len(results)))
+
+	// Calculate advantage based on bit-match scores
+	for i := range results {
+		if stdDev > 0 {
+			results[i].Advantage = (bitScores[i] - mean) / stdDev
+		} else {
+			results[i].Advantage = bitScores[i] - mean
+		}
+		// Boost advantage for seeds that pass difficulty mask
+		if eh.IsWinningSeed(results[i].HashOutput, uint32(targetToken)) {
+			results[i].Advantage += 2.0 // Significant boost for passing difficulty
+		}
+	}
+
+	return results
+}
+
+// Legacy advantage calculation (kept for compatibility)
 func (eh *EvolutionaryHarness) CalculateAdvantage(results []SeedResult) []SeedResult {
 	if len(results) == 0 {
 		return results
@@ -612,7 +684,7 @@ func (eh *EvolutionaryHarness) BitwiseMutation(seed []byte, advantage float64) [
 	return mutated
 }
 
-func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, targetToken int32, tokenMap map[int32]bool, sim simulator.HashSimulator) ([]SeedResult, error) {
+func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, record *TrainingRecord, tokenMap map[int32]bool, sim simulator.HashSimulator) ([]SeedResult, error) {
 	var results []SeedResult
 
 	// Extract nonces from seeds for batch processing
@@ -626,8 +698,7 @@ func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, ta
 		candidateNonces = append(candidateNonces, nonce)
 	}
 
-	// Batch evaluate using Bitcoin headers for efficiency
-	results, err := eh.EvaluatePopulationBatch(population, targetToken, tokenMap, sim, seedIDs, candidateNonces)
+	results, err := eh.EvaluatePopulationBatch(population, record, tokenMap, sim, seedIDs, candidateNonces)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +721,7 @@ func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, ta
 // Optimized for GPU batch processing and BM1382 "Camouflage" strategy
 func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 	population *SeedPopulation,
-	targetToken int32,
+	record *TrainingRecord,
 	tokenMap map[int32]bool,
 	sim simulator.HashSimulator,
 	seedIDs []uint32,
@@ -658,18 +729,14 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 ) ([]SeedResult, error) {
 	results := make([]SeedResult, len(seedIDs))
 
-	// Create temporary slots for header construction (in real implementation, these come from TrainingRecord)
-	tempSlots := [12]uint32{
-		0x12345678, 0x23456789, 0x34567890, 0x45678901, // Placeholder slots 0-7
-		0x56789012, 0x67890123, 0x78901234, 0x89012345, // Placeholder slots 8-11
-		0x90123456, 0x01234567, 0x12345678, 0x23456789,
-	}
+	// The record's FeatureVector contains the contextual data for the ASIC job
+	slots := record.FeatureVector
 
 	// Create hardware prep for batch processing
 	hwPrep := simulator.NewHardwarePrep(true) // Enable caching for performance
 
 	// Generate Bitcoin headers for all candidate nonces in batch
-	headers := hwPrep.PrepareAsicJobBatch(tempSlots, candidateNonces)
+	headers := hwPrep.PrepareAsicJobBatch(slots, candidateNonces)
 
 	// Evaluate each header
 	for i, header := range headers {
@@ -694,14 +761,17 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 		// The golden nonce is first 4 bytes of final Double-SHA256
 		goldenNonce := finalHash
 
+		// Store hash output for bit-matching
+		result.HashOutput = goldenNonce
+
 		// Calculate rewards
-		result.Alignment = eh.calculateAlignmentReward(goldenNonce, targetToken, tokenMap)
+		result.Alignment = eh.calculateAlignmentReward(goldenNonce, record.TargetToken, tokenMap)
 		result.Stability = eh.calculateStabilityReward(seed, sim)
-		result.Format = eh.calculateFormatReward(goldenNonce, targetToken, tokenMap)
+		result.Format = eh.calculateFormatReward(goldenNonce, record.TargetToken, tokenMap)
 
 		// Bonus for exact target match
 		exactMatchBonus := 0.0
-		if goldenNonce == uint32(targetToken) {
+		if goldenNonce == uint32(record.TargetToken) {
 			exactMatchBonus = 0.5 // Significant bonus for exact match
 		}
 
@@ -709,8 +779,8 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 		results[i] = *result
 	}
 
-	// Calculate advantages across the batch
-	results = eh.CalculateAdvantage(results)
+	// Calculate advantages using bit-match scores (provides gradient despite SHA-256 avalanche)
+	results = eh.CalculateBitMatchAdvantage(results, record.TargetToken)
 
 	return results, nil
 }
@@ -765,4 +835,3 @@ func ComputeContextHash(tokenSequence []int32, windowSize int) uint32 {
 
 	return uint32(hash[0]) | uint32(hash[1])<<8 | uint32(hash[2])<<16 | uint32(hash[3])<<24
 }
-

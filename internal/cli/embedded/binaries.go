@@ -19,7 +19,7 @@ import (
 // If binaries aren't present, the CLI will look for pre-compiled binaries
 // in the app data directory or prompt to compile them.
 
-//go:embed all:bin
+//go:embed all:bin/*
 var embeddedBinaries embed.FS
 
 // BinaryInfo contains metadata about an embedded binary
@@ -36,6 +36,24 @@ var AvailableBinaries = []BinaryInfo{
 	{
 		Name:        "hasher-host",
 		Description: "Hasher orchestrator for Native OS",
+		TargetOS:    "linux",
+		TargetArch:  "amd64",
+	},
+	{
+		Name:        "dataminer",
+		Description: "Data Miner - Document structuring and PDF processing pipeline",
+		TargetOS:    "linux",
+		TargetArch:  "amd64",
+	},
+	{
+		Name:        "data-encoder",
+		Description: "Data Encoder - Tokenization and embedding generation pipeline",
+		TargetOS:    "linux",
+		TargetArch:  "amd64",
+	},
+	{
+		Name:        "data-trainer",
+		Description: "Data Trainer - Model training and neural network optimization pipeline",
 		TargetOS:    "linux",
 		TargetArch:  "amd64",
 	},

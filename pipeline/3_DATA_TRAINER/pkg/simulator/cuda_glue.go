@@ -1,3 +1,6 @@
+//go:build cuda
+// +build cuda
+
 package simulator
 
 /*
@@ -21,6 +24,6 @@ import (
 
 // RegisterCudaHelper binds the GPU bridge to the uBPF VM as ID 1
 func RegisterCudaHelper(vm unsafe.Pointer) {
-	C.ubpf_register((*C.struct_ubpf_vm)(vm), 1, C.CString("run_cuda_search"), 
+	C.ubpf_register((*C.struct_ubpf_vm)(vm), 1, C.CString("run_cuda_search"),
 		(C.external_function_t)(unsafe.Pointer(C.cuda_helper_callback)))
 }

@@ -3,6 +3,7 @@ package validator
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"sync"
 	"time"
 )
@@ -204,6 +205,18 @@ func (chv *CrossHardwareValidator) calculateErrorMargin(gpuOutput, asicOutput ui
 	}
 
 	return float64(diff) / float64(maxV)
+}
+
+// IsWinningSeed checks if a hash matches the target within a difficulty mask
+// difficulty 0xFFFF0000 means we only care about the first 16 bits matching
+func IsWinningSeed(hash uint32, target uint32, difficulty uint32) bool {
+	return (hash & difficulty) == (target & difficulty)
+}
+
+// CalculateBitMatchScore returns how many leading bits match between hash and target
+func CalculateBitMatchScore(hash uint32, target uint32) int {
+	diff := hash ^ target
+	return bits.LeadingZeros32(diff)
 }
 
 func (chv *CrossHardwareValidator) updateStats(result *ValidationResult) {
