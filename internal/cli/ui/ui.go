@@ -3,11 +3,14 @@ package ui
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -23,6 +26,7 @@ import (
 	"hasher/internal/analyzer"
 	"hasher/internal/cli/embedded"
 	"hasher/internal/client"
+	"hasher/internal/config"
 	"hasher/internal/hasher"
 )
 
@@ -158,7 +162,12 @@ var primaryMenuItems = []list.Item{
 		view:        AsicConfigView,
 	},
 	menuItem{
-		title:       "3. Test Chat",
+		title:       "3. Start Driver",
+		description: "Start the hasher-host orchestrator and show initialization logs",
+		view:        PrimaryMenuView,
+	},
+	menuItem{
+		title:       "4. Test Chat",
 		description: "Test hasher validation service via chat interface",
 		view:        ChatView,
 	},
@@ -260,6 +269,9 @@ type Model struct {
 	PipelineStage    string // Current stage: "miner", "encoder", "trainer", "complete"
 	PipelineProgress float64
 	PipelineLogs     []string
+
+	// Log channel for hasher-host output
+	LogChan chan string
 }
 
 // NewModel creates a new UI model
@@ -360,6 +372,15 @@ func NewModel() Model {
 		ChatContent:     "Welcome to Hasher CLI!\n\nType your message below for hasher-based inference.",
 		LogContent:      "Logs will appear here...",
 		InitContent:     "",
+
+		// Data Pipeline state
+		PipelineRunning:  false,
+		PipelineStage:    "",
+		PipelineProgress: 0,
+		PipelineLogs:     []string{},
+
+		// Log channel for hasher-host output
+		LogChan: make(chan string, 100),
 	}
 
 	// Initialize views
@@ -407,6 +428,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
 		}
 		m.updateLogView()
+		// Continue polling for more logs if server is starting
+		if m.ServerStarting && !m.ServerReady {
+			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+				return pollServerLogsMsg{}
+			}))
+		}
+
+	case pollServerLogsMsg:
+		// Poll for more logs from the channel
+		if m.ServerStarting && !m.ServerReady {
+			select {
+			case log := <-m.LogChan:
+				m.ServerLogs = append(m.ServerLogs, log)
+				if len(m.ServerLogs) > 50 {
+					m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
+				}
+				m.updateLogView()
+			default:
+				// No log available, just continue
+			}
+			// Continue polling
+			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+				return pollServerLogsMsg{}
+			}))
+		}
 
 	case AppendChatMsg:
 		m.ChatHistory = append(m.ChatHistory, msg.Msg)
@@ -549,7 +595,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, m.runDataPipeline())
 					case "2. ASIC Config":
 						m.CurrentView = AsicConfigView
-					case "3. Test Chat":
+					case "3. Start Driver":
+						m.ServerStarting = true
+						m.ServerLogs = append(m.ServerLogs, "Initializing...")
+						cmds = append(cmds, m.startHasherHost())
+					case "4. Test Chat":
 						m.CurrentView = ChatView
 					case "0. Quit":
 						return m, tea.Quit
@@ -2161,6 +2211,9 @@ type PipelineCompleteMsg struct {
 	Message string
 }
 
+// pollServerLogsMsg is sent to trigger log polling while server is starting
+type pollServerLogsMsg struct{}
+
 // handleMouse handles mouse events for text selection and scrolling
 func (m Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	switch msg.Type {
@@ -2237,4 +2290,187 @@ func (m Model) isInScrollbar(x, y int, viewportX, viewportY, viewportWidth, view
 	scrollbarY := viewportY
 
 	return x == scrollbarX && y >= scrollbarY && y < scrollbarY+viewportHeight
+}
+
+// startHasherHost starts the hasher-host process and begins log capture
+// Uses the model's LogChan to stream logs to the UI
+func (m *Model) startHasherHost() tea.Cmd {
+	return func() tea.Msg {
+		// Check if hasher-host is already running
+		if port := findRunningHasherHost(); port > 0 {
+			m.ServerReady = true
+			m.ServerStarting = false
+			m.APIClient = client.NewAPIClient(port)
+			return ServerReadyMsg{Ready: true, Starting: false, Port: port}
+		}
+
+		// Force extract a fresh hasher-host binary
+		hostPath, err := embedded.GetHasherHostPathForce()
+		if err != nil {
+			return CombinedLogChatMsg{
+				Log:  fmt.Sprintf("Failed to extract hasher-host: %v", err),
+				Chat: errorStyle.Render("Failed to extract hasher-host: " + err.Error()),
+			}
+		}
+
+		// Get the binary directory for working directory
+		binDir, err := embedded.GetBinDir()
+		if err != nil {
+			return CombinedLogChatMsg{
+				Log:  fmt.Sprintf("Failed to get binary directory: %v", err),
+				Chat: errorStyle.Render("Failed to get binary directory: " + err.Error()),
+			}
+		}
+
+		// Build hasher-host arguments
+		var args []string
+
+		// Check if device configuration is available
+		deviceConfig, err := config.LoadDeviceConfig()
+		if err == nil && deviceConfig.IP != "" {
+			// Device is configured, use it
+			args = append(args, "--device="+deviceConfig.IP)
+			args = append(args, "--discover=false")
+			args = append(args, "--force-redeploy=true")
+		} else {
+			// No device configuration, enable discovery for auto-detection
+			args = append(args, "--discover=true")
+			args = append(args, "--auto-deploy=true")
+		}
+
+		// Start hasher-host with configured arguments
+		cmd := exec.Command(hostPath, args...)
+		cmd.Dir = binDir
+
+		// Create pipes to capture output and forward to the UI
+		stdoutPipe, _ := cmd.StdoutPipe()
+		stderrPipe, _ := cmd.StderrPipe()
+
+		if err := cmd.Start(); err != nil {
+			return CombinedLogChatMsg{
+				Log:  fmt.Sprintf("Error starting hasher-host: %v", err),
+				Chat: errorStyle.Render("Error starting hasher-host: " + err.Error()),
+			}
+		}
+
+		// Store the command reference
+		m.ServerCmd = cmd
+
+		// Goroutine to forward stdout to the log channel
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := stdoutPipe.Read(buf)
+				if err != nil {
+					return
+				}
+				if n > 0 {
+					select {
+					case m.LogChan <- string(buf[:n]):
+					default:
+					}
+				}
+			}
+		}()
+
+		// Goroutine to forward stderr to the log channel
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := stderrPipe.Read(buf)
+				if err != nil {
+					return
+				}
+				if n > 0 {
+					select {
+					case m.LogChan <- string(buf[:n]):
+					default:
+					}
+				}
+			}
+		}()
+
+		// Start a goroutine to wait for the server to be ready
+		go func() {
+			startTime := time.Now()
+			timeout := 5 * time.Minute
+			portFile := "/tmp/hasher-host.port"
+
+			for time.Since(startTime) < timeout {
+				portBytes, err := os.ReadFile(portFile)
+				if err == nil {
+					port, err := strconv.Atoi(strings.TrimSpace(string(portBytes)))
+					if err == nil && isHasherHostRunning(port) {
+						m.ServerReady = true
+						m.ServerStarting = false
+						m.APIClient = client.NewAPIClient(port)
+						return
+					}
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}()
+
+		// Return initial log message - polling will be started by the AppendLogMsg handler
+		return AppendLogMsg{Log: fmt.Sprintf("hasher-host started with PID %d", cmd.Process.Pid)}
+	}
+}
+
+// ServerState holds the hasher-host process state (shared between goroutines)
+type ServerState struct {
+	Cmd     *exec.Cmd
+	Started bool
+	Port    int
+	Mu      sync.Mutex
+}
+
+func (s *ServerState) Get() (*exec.Cmd, bool, int) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	return s.Cmd, s.Started, s.Port
+}
+
+func (s *ServerState) Set(cmd *exec.Cmd, started bool, port int) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.Cmd = cmd
+	s.Started = started
+	s.Port = port
+}
+
+// findRunningHasherHost checks if hasher-host is already running on any port and returns the port
+func findRunningHasherHost() int {
+	// Common ports to check
+	ports := []int{8080, 8081, 8082, 8083, 8084, 8085, 8008, 9000}
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, port := range ports {
+		resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", port))
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return port
+			}
+		}
+	}
+	return 0
+}
+
+// isHasherHostRunning checks if hasher-host API is responding on a specific port
+func isHasherHostRunning(port int) bool {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+// CheckExistingHasherHost checks if hasher-host is already running and updates model state
+func (m *Model) CheckExistingHasherHost() {
+	if port := findRunningHasherHost(); port > 0 {
+		m.ServerReady = true
+		m.ServerStarting = false
+		m.APIClient = client.NewAPIClient(port)
+	}
 }

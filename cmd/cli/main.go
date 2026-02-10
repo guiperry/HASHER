@@ -15,9 +15,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -25,11 +22,6 @@ import (
 	"hasher/internal/analyzer"
 	"hasher/internal/cli/embedded"
 	"hasher/internal/cli/ui"
-	"hasher/internal/config"
-)
-
-const (
-	portFile = "/tmp/hasher-host.port"
 )
 
 // CLI configuration flags
@@ -37,33 +29,8 @@ var (
 	monitorLogs = flag.Bool("monitor-logs", true, "enable server log monitoring")
 )
 
-// ServerState holds the hasher-host process state (shared between goroutines)
-type ServerState struct {
-	Cmd     *exec.Cmd
-	Started bool
-	Port    int
-	Mu      sync.Mutex
-}
-
-func (s *ServerState) Get() (*exec.Cmd, bool, int) {
-	s.Mu.Lock()
-	defer s.Mu.Unlock()
-	return s.Cmd, s.Started, s.Port
-}
-
-func (s *ServerState) Set(cmd *exec.Cmd, started bool, port int) {
-	s.Mu.Lock()
-	defer s.Mu.Unlock()
-	s.Cmd = cmd
-	s.Started = started
-	s.Port = port
-}
-
 func main() {
 	flag.Parse()
-
-	// Shared server state (accessible from all goroutines)
-	serverState := &ServerState{}
 
 	// Initialize embedded binaries
 	initEmbeddedBinaries()
@@ -72,15 +39,11 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create log channel for server output
-	logChan := make(chan string, 100)
-
-	// Create UI model and pass log channel
+	// Create UI model
 	model := ui.NewModel()
-	// Set ServerStarting to true immediately so initialization screen shows
-	model.ServerStarting = true
-	// Send initial message to show we're starting
-	model.ServerLogs = append(model.ServerLogs, "Initializing...")
+
+	// Check if hasher-host is already running and update model state
+	model.CheckExistingHasherHost()
 
 	// Start the Bubble Tea UI with alternate screen and mouse support
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -90,28 +53,11 @@ func main() {
 		<-sigChan
 		fmt.Println("\nReceived shutdown signal.")
 		cleanupASICDevice(model.Deployer)
-		cmd, started, port := serverState.Get()
-		shutdownHasherHost(cmd, started, port)
+		// Shutdown hasher-host if it was started via the UI
+		if model.ServerCmd != nil && model.ServerCmd.Process != nil {
+			shutdownHasherHost(model.ServerCmd, true, 8080)
+		}
 		os.Exit(0)
-	}()
-
-	// Start log listener and send log messages to program
-	go func() {
-		for log := range logChan {
-			p.Send(ui.AppendLogMsg{Log: log})
-		}
-	}()
-
-	// Start hasher-host in background - don't block UI
-	go func() {
-		hasherHostCmd, hasherHostStarted, hasherHostPort := startHasherHost(logChan)
-		serverState.Set(hasherHostCmd, hasherHostStarted, hasherHostPort)
-
-		// Update model with server info
-		p.Send(ui.ServerCmdMsg{Cmd: hasherHostCmd})
-		if hasherHostStarted {
-			p.Send(ui.ServerReadyMsg{Ready: true, Starting: false, Port: hasherHostPort})
-		}
 	}()
 
 	if _, err := p.Run(); err != nil {
@@ -210,151 +156,6 @@ func findEnvFile() string {
 	}
 
 	return ""
-}
-
-// startHasherHost attempts to start the hasher-host orchestrator
-func startHasherHost(logChan chan string) (*exec.Cmd, bool, int) {
-	// Force extract a fresh hasher-host binary
-	hostPath, err := embedded.GetHasherHostPathForce()
-	if err != nil {
-		logChan <- fmt.Sprintf("Failed to extract hasher-host: %v", err)
-		return nil, false, 8080
-	}
-
-	// Get the binary directory for working directory
-	binDir, err := embedded.GetBinDir()
-	if err != nil {
-		logChan <- fmt.Sprintf("Failed to get binary directory: %v", err)
-		return nil, false, 8080
-	}
-
-	// Check if hasher-host is already running on common ports
-	if port := findRunningHasherHost(); port > 0 {
-		logChan <- fmt.Sprintf("Found existing hasher-host on port %d.", port)
-		return nil, true, port
-	}
-
-	logChan <- fmt.Sprintf("Starting hasher-host from %s...", hostPath)
-
-	// Build hasher-host arguments
-	var args []string
-
-	// Check if device configuration is available
-	deviceConfig, err := config.LoadDeviceConfig()
-	if err == nil && deviceConfig.IP != "" {
-		// Device is configured, use it
-		args = append(args, "--device="+deviceConfig.IP)
-		args = append(args, "--discover=false")
-		args = append(args, "--force-redeploy=true")
-		logChan <- fmt.Sprintf("Using configured device %s (discovery disabled, force-redeploy enabled)", deviceConfig.IP)
-	} else {
-		// No device configuration, enable discovery for auto-detection
-		args = append(args, "--discover=true")
-		args = append(args, "--auto-deploy=true")
-		logChan <- "No device configuration found - enabling network discovery and auto-deployment"
-	}
-
-	// Start hasher-host with configured arguments
-	cmd := exec.Command(hostPath, args...)
-	cmd.Dir = binDir
-
-	// Create pipes to capture output and forward to the UI
-	stdoutPipe, _ := cmd.StdoutPipe()
-	stderrPipe, _ := cmd.StderrPipe()
-
-	if err := cmd.Start(); err != nil {
-		logChan <- fmt.Sprintf("Error starting hasher-host: %v", err)
-		return nil, false, 8081
-	}
-
-	logChan <- fmt.Sprintf("hasher-host started with PID %d", cmd.Process.Pid)
-
-	// Goroutine to forward stdout to the log channel
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stdoutPipe.Read(buf)
-			if err != nil {
-				return
-			}
-			if n > 0 {
-				logChan <- string(buf[:n])
-			}
-		}
-	}()
-
-	// Goroutine to forward stderr to the log channel
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stderrPipe.Read(buf)
-			if err != nil {
-				return
-			}
-			if n > 0 {
-				logChan <- string(buf[:n])
-			}
-		}
-	}()
-
-	// --- NEW LOGIC: Wait for port file and health check ---
-	startTime := time.Now()
-	timeout := 5 * time.Minute // Extended timeout for server deployment
-	var actualPort int
-
-	for time.Since(startTime) < timeout {
-		portBytes, err := os.ReadFile(portFile)
-		if err == nil {
-			port, err := strconv.Atoi(strings.TrimSpace(string(portBytes)))
-			if err == nil {
-				actualPort = port
-				// Now that we have a port, check the health endpoint
-				if isHasherHostRunning(actualPort) {
-					logChan <- fmt.Sprintf("hasher-host is ready on port %d!", actualPort)
-					return cmd, true, actualPort
-				}
-			}
-		}
-		// Wait a bit before retrying
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	logChan <- "Error: hasher-host startup timed out. Continuing without orchestrator."
-
-	// Attempt to kill the process we started, since it's not healthy
-	if cmd.Process != nil {
-		cmd.Process.Kill()
-	}
-	return cmd, false, 8080 // default port
-}
-
-// findRunningHasherHost checks if hasher-host is already running on any port and returns the port
-func findRunningHasherHost() int {
-	// Common ports to check
-	ports := []int{8080, 8081, 8082, 8083, 8084, 8085, 8008, 9000}
-	client := &http.Client{Timeout: 2 * time.Second}
-
-	for _, port := range ports {
-		resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				return port
-			}
-		}
-	}
-	return 0
-}
-
-// isHasherHostRunning checks if hasher-host API is responding on a specific port
-func isHasherHostRunning(port int) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", port))
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
 }
 
 // cleanupASICDevice removes deployed binaries from the ASIC device
