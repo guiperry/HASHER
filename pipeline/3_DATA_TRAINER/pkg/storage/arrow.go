@@ -5,19 +5,35 @@ import (
 	"path/filepath"
 
 	"github.com/apache/arrow/go/arrow"
-	"github.com/apache/arrow/go/arrow/ipc"
 	"github.com/apache/arrow/go/arrow/array"
+	"github.com/apache/arrow/go/arrow/ipc"
 	"github.com/apache/arrow/go/arrow/memory"
 	"github.com/lab/hasher/data-trainer/pkg/training"
 )
 
 // GetTrainingRecordArrowSchema returns the Arrow schema for TrainingRecord
+// This matches the schema used by the Data Encoder (2_DATA_ENCODER)
 func GetTrainingRecordArrowSchema() *arrow.Schema {
 	return arrow.NewSchema([]arrow.Field{
-		{Name: "token_sequence", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32), Nullable: true},
-		{Name: "feature_vector", Type: arrow.FixedSizeListOf(12, arrow.PrimitiveTypes.Uint32), Nullable: false},
-		{Name: "target_token", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-		{Name: "context_hash", Type: arrow.PrimitiveTypes.Uint32, Nullable: true},
+		{Name: "source_file", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "chunk_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "window_start", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "window_end", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "context_length", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_0", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_6", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_7", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_8", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_9", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_10", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "asic_slot_11", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "target_token_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "best_seed", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
 }
 
@@ -60,42 +76,45 @@ func ReadTrainingRecordsFromArrowIPC(filePath string) ([]*training.TrainingRecor
 func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord, error) {
 	var records []*training.TrainingRecord
 
-	// Get columns
-	tokenSequenceCol := batch.Column(0).(*array.List)
-	featureVectorCol := batch.Column(1).(*array.FixedSizeList)
-	targetTokenCol := batch.Column(2).(*array.Int32)
-	contextHashCol := batch.Column(3).(*array.Uint32)
+	// Get columns - matches the schema from Data Encoder
+	chunkIDCol := batch.Column(1).(*array.Int32)
+	asicSlot0Col := batch.Column(5).(*array.Int32)
+	asicSlot1Col := batch.Column(6).(*array.Int32)
+	asicSlot2Col := batch.Column(7).(*array.Int32)
+	asicSlot3Col := batch.Column(8).(*array.Int32)
+	asicSlot4Col := batch.Column(9).(*array.Int32)
+	asicSlot5Col := batch.Column(10).(*array.Int32)
+	asicSlot6Col := batch.Column(11).(*array.Int32)
+	asicSlot7Col := batch.Column(12).(*array.Int32)
+	asicSlot8Col := batch.Column(13).(*array.Int32)
+	asicSlot9Col := batch.Column(14).(*array.Int32)
+	asicSlot10Col := batch.Column(15).(*array.Int32)
+	asicSlot11Col := batch.Column(16).(*array.Int32)
+	targetTokenCol := batch.Column(17).(*array.Int32)
 
 	// Convert each row
 	for i := 0; i < int(batch.NumRows()); i++ {
-		// Read token sequence
-		var tokenSequence []int32
-		if !tokenSequenceCol.IsNull(i) {
-			tokenSequenceOffset := tokenSequenceCol.Offsets()[i]
-			tokenSequenceLength := tokenSequenceCol.Offsets()[i+1] - tokenSequenceOffset
-			tokenSequenceValues := tokenSequenceCol.ListValues().(*array.Int32).Int32Values()
-			tokenSequenceSlice := tokenSequenceValues[tokenSequenceOffset:tokenSequenceOffset+tokenSequenceLength]
-			tokenSequence = make([]int32, len(tokenSequenceSlice))
-			copy(tokenSequence, tokenSequenceSlice)
-		}
-
-		// Read feature vector
+		// Map ASIC slots to FeatureVector
 		var featureVector [12]uint32
-		fvValues := featureVectorCol.ListValues().(*array.Uint32)
-		baseIndex := i * 12
-		for j := 0; j < 12; j++ {
-			featureVector[j] = fvValues.Value(baseIndex + j)
-		}
+		featureVector[0] = uint32(asicSlot0Col.Value(i))
+		featureVector[1] = uint32(asicSlot1Col.Value(i))
+		featureVector[2] = uint32(asicSlot2Col.Value(i))
+		featureVector[3] = uint32(asicSlot3Col.Value(i))
+		featureVector[4] = uint32(asicSlot4Col.Value(i))
+		featureVector[5] = uint32(asicSlot5Col.Value(i))
+		featureVector[6] = uint32(asicSlot6Col.Value(i))
+		featureVector[7] = uint32(asicSlot7Col.Value(i))
+		featureVector[8] = uint32(asicSlot8Col.Value(i))
+		featureVector[9] = uint32(asicSlot9Col.Value(i))
+		featureVector[10] = uint32(asicSlot10Col.Value(i))
+		featureVector[11] = uint32(asicSlot11Col.Value(i))
 
 		// Read other fields
 		targetToken := targetTokenCol.Value(i)
-		var contextHash uint32
-		if !contextHashCol.IsNull(i) {
-			contextHash = contextHashCol.Value(i)
-		}
+		contextHash := uint32(chunkIDCol.Value(i)) // Using ChunkID as context identifier
 
 		records = append(records, &training.TrainingRecord{
-			TokenSequence: tokenSequence,
+			TokenSequence: []int32{targetToken}, // Simple token sequence for now
 			FeatureVector: featureVector,
 			TargetToken:   targetToken,
 			ContextHash:   contextHash,
@@ -192,7 +211,7 @@ func trainingRecordsToArrowBatch(records []*training.TrainingRecord, mem memory.
 	// Create record - use type assertion to []Interface
 	var cols []array.Interface
 	cols = append(cols, tokenSequenceArr, featureVectorArr, targetTokenArr, contextHashArr)
-	
+
 	return array.NewRecord(schema, cols, int64(len(records))), nil
 }
 

@@ -26,7 +26,7 @@ import (
 
 var (
 	configFile     = flag.String("config", "", "Path to configuration file")
-	dataPath       = flag.String("data", "data", "Path to data directory")
+	dataPath       = flag.String("data", "", "Path to data directory (default: app data directory)")
 	maxEpochs      = flag.Int("epochs", 10, "Maximum number of training epochs")
 	population     = flag.Int("population", 256, "Population size for evolution")
 	maxGenerations = flag.Int("generations", 200, "Maximum number of generations")
@@ -154,7 +154,19 @@ func main() {
 
 	logger.Info("Starting HASHER Data Trainer v1.0")
 
-	orchestrator, err := NewTrainingOrchestrator(logger, cfg, *dataPath, *sequential)
+	// Determine data path - use flag if provided, otherwise default to app data dir
+	effectiveDataPath := *dataPath
+	if effectiveDataPath == "" {
+		effectiveDataPath, err = getAppDataDir()
+		if err != nil {
+			logger.Fatal("Failed to get app data directory: %v", err)
+		}
+		logger.Info("Using default data directory: %s", effectiveDataPath)
+	} else {
+		logger.Info("Using specified data directory: %s", effectiveDataPath)
+	}
+
+	orchestrator, err := NewTrainingOrchestrator(logger, cfg, effectiveDataPath, *sequential)
 	if err != nil {
 		logger.Fatal("Failed to initialize orchestrator: %v", err)
 	}
@@ -247,14 +259,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	if to.sequential {
 		to.logger.Info("Sequential processing enabled (cleaner logs)")
 	}
-	var trainingDataPath string
-	if to.dataPath != "" {
-		// Use provided data directory, expecting training_frames.json inside frames subdirectory
-		trainingDataPath = filepath.Join(to.dataPath, "frames", "training_frames.json")
-	} else {
-		// Default path in app data directory
-		trainingDataPath = filepath.Join(appDataDir, "frames", "training_frames.json")
-	}
+	trainingDataPath := filepath.Join(to.dataPath, "frames", "training_frames.json")
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
 	}
@@ -681,6 +686,12 @@ func (to *TrainingOrchestrator) Shutdown() {
 }
 
 func loadConfig(filename string) (*config.Config, error) {
+	// Get default app data directory for config paths
+	defaultDataPath, err := getAppDataDir()
+	if err != nil {
+		defaultDataPath = "data" // Fallback to local directory if app data dir can't be determined
+	}
+
 	config := &config.Config{
 		Simulator: &config.SimulatorConfig{
 			DeviceType:     "vhasher",
@@ -691,7 +702,7 @@ func loadConfig(filename string) (*config.Config, error) {
 			Timeout:        30,
 		},
 		Storage: &config.StorageConfig{
-			BasePath:  "data/weights",
+			BasePath:  filepath.Join(defaultDataPath, "weights"),
 			LayerSize: 1000,
 		},
 		Training: &config.TrainingConfig{
@@ -709,7 +720,7 @@ func loadConfig(filename string) (*config.Config, error) {
 			RetryDelay:        "5s",
 			ValidationMode:    "strict",
 			BackupEnabled:     true,
-			BackupPath:        "data/backups",
+			BackupPath:        filepath.Join(defaultDataPath, "backups"),
 			RollbackEnabled:   true,
 		},
 		Validation: &config.ValidationConfig{
