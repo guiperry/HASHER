@@ -10,7 +10,6 @@ import (
 
 	"hasher/pkg/hashing/core"
 	"hasher/pkg/hashing/hardware"
-	"hasher/pkg/hashing/jitter"
 )
 
 // UbpfMethod implements the HashMethod interface for uBPF-based hashing
@@ -219,7 +218,7 @@ func (m *UbpfMethod) MineHeader(header []byte, nonceStart, nonceEnd uint32) (uin
 }
 
 // mineWithCGMiner attempts mining using CGMiner API
-func (m *UbpfMethod) mineWithCGMiner(header []byte, nonceStart, nonceEnd uint32) (uint32, error) {
+func (m *UbpfMethod) mineWithCGMiner(_ []byte, nonceStart, nonceEnd uint32) (uint32, error) {
 	// Convert header to CGMiner format
 	// TODO: Implement proper CGMiner API call
 	_ = nonceStart
@@ -355,20 +354,23 @@ func (m *UbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 	}, nil
 }
 
+// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+func (m *UbpfMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
+	if !m.initialized {
+		return nil, fmt.Errorf("uBPF method not initialized")
+	}
+
+	return m.vm.ExecuteRecursiveMine(header, passes)
+}
+
 // LoadJitterTable loads associative memory for jitter lookup
 func (m *UbpfMethod) LoadJitterTable(table map[uint32]uint32) error {
 	if !m.initialized {
 		return fmt.Errorf("uBPF method not initialized")
 	}
 
-	// Convert uint32 to JitterVector
-	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
-	for k, v := range table {
-		jitterTable[k] = jitter.JitterVector(v)
-	}
-
 	// Load into the jitter engine
-	m.vm.LoadJitterTable(jitterTable)
+	m.vm.LoadJitterTable(table)
 	return nil
 }
 

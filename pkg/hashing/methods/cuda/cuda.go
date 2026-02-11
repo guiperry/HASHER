@@ -59,10 +59,21 @@ extern int cuda_get_device_properties(int deviceId, cuda_device_prop_t* props) {
 extern int launch_double_sha256(const uint32_t* headers, uint32_t* results, int num_samples, int block_size, int grid_size) {
 	return mock_launch_double_sha256(headers, results, num_samples, block_size, grid_size);
 }
+
+extern int launch_double_sha256_full(const uint32_t* headers, uint32_t* results, int num_samples, int block_size, int grid_size) {
+	// Mock implementation for full 32-byte hash
+	for (int i = 0; i < num_samples; i++) {
+		for (int j = 0; j < 8; j++) {
+			results[i * 8 + j] = headers[i * 20 + j] ^ 0x55555555;
+		}
+	}
+	return 0;
+}
 */
 import "C"
 
 import (
+	"encoding/binary"
 	"fmt"
 	"unsafe"
 )
@@ -216,6 +227,47 @@ func (cb *CudaBridge) ProcessSingleHeader(header []byte, targetTokenID uint32) (
 	}
 
 	return 0, fmt.Errorf("no match found")
+}
+
+// ComputeDoubleHashFull processes multiple 80-byte headers and returns full 32-byte hashes
+func (cb *CudaBridge) ComputeDoubleHashFull(headers [][]byte) ([][32]byte, error) {
+	if !cb.initialized {
+		return nil, fmt.Errorf("CUDA not initialized")
+	}
+
+	numHeaders := len(headers)
+	if numHeaders == 0 {
+		return nil, nil
+	}
+
+	headerArray := make([]uint32, numHeaders*20)
+	for i, h := range headers {
+		for j := 0; j < 20; j++ {
+			headerArray[i*20+j] = uint32(h[j*4]) | uint32(h[j*4+1])<<8 | uint32(h[j*4+2])<<16 | uint32(h[j*4+3])<<24
+		}
+	}
+
+	results := make([]uint32, numHeaders*8)
+	res := C.launch_double_sha256_full(
+		(*C.uint32_t)(unsafe.Pointer(&headerArray[0])),
+		(*C.uint32_t)(unsafe.Pointer(&results[0])),
+		C.int(numHeaders),
+		256,
+		C.int((numHeaders+255)/256),
+	)
+
+	if res != 0 {
+		return nil, fmt.Errorf("CUDA kernel launch failed: %d", res)
+	}
+
+	finalResults := make([][32]byte, numHeaders)
+	for i := 0; i < numHeaders; i++ {
+		for j := 0; j < 8; j++ {
+			binary.LittleEndian.PutUint32(finalResults[i][j*4:], results[i*8+j])
+		}
+	}
+
+	return finalResults, nil
 }
 
 // GetPerformanceStats returns CUDA performance information

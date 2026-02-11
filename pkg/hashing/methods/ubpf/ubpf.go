@@ -307,8 +307,29 @@ func (vm *uBPFVM) Execute21PassLoop(header []byte, targetTokenID uint32) (*jitte
 }
 
 // LoadJitterTable loads a jitter table into the engine
-func (vm *uBPFVM) LoadJitterTable(table map[uint32]jitter.JitterVector) {
+func (vm *uBPFVM) LoadJitterTable(table map[uint32]uint32) {
 	vm.jitterEngine.GetSearcher().LoadJitterTable(table)
+}
+
+// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+func (vm *uBPFVM) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
+	if !vm.loaded {
+		return nil, fmt.Errorf("eBPF not loaded")
+	}
+
+	// Update config temporarily
+	originalPassCount := vm.jitterEngine.GetConfig().PassCount
+	vm.jitterEngine.GetConfig().PassCount = passes
+	defer func() {
+		vm.jitterEngine.GetConfig().PassCount = originalPassCount
+	}()
+
+	result, err := vm.jitterEngine.Execute21PassLoop(header, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.FullSeed, nil
 }
 
 // GetStats returns VM statistics

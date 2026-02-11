@@ -1,15 +1,16 @@
 package jitter
 
 import (
-	"encoding/binary"
 	"fmt"
+	"math"
 	"sync"
 )
 
 // FlashSearcher provides high-speed associative memory lookup for jitter vectors
-// This implements the "Flash Search" mechanism described in JITTER_IMPLEMENTATION.md
+// This implements the "Flash Search" mechanism with Dimension Shift (Search 0, Retrieve 1)
 type FlashSearcher struct {
-	// In-memory jitter lookup table (simulates SRAM-like access)
+	// In-memory jitter lookup table
+	// Key: Slot 0 (Subject), Value: Slot 1 (Predicate/Jitter)
 	jitterTable map[uint32]JitterVector
 
 	// Cache for recently accessed jitters
@@ -52,57 +53,61 @@ func NewFlashSearcher(config *JitterConfig) *FlashSearcher {
 	}
 }
 
-// LoadJitterFromParquet loads jitter vectors from a parquet file
-// This is a high-level wrapper that can be extended to support actual parquet parsing
-func LoadJitterFromParquet(filename string) map[uint32]JitterVector {
-	// For now, return an empty map
-	// In production, this would parse the parquet file and extract jitter vectors
-	fmt.Printf("[FlashSearch] Loading jitter table from: %s\n", filename)
-
-	// Placeholder: Return empty table
-	// Real implementation would:
-	// 1. Open parquet file
-	// 2. Read weight records
-	// 3. Map hash prefixes to jitter vectors
-	return make(map[uint32]JitterVector)
-}
-
 // LoadJitterTable loads a pre-built jitter table into the searcher
-func (fs *FlashSearcher) LoadJitterTable(table map[uint32]JitterVector) {
+func (fs *FlashSearcher) LoadJitterTable(table map[uint32]uint32) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
 	fs.jitterTable = make(map[uint32]JitterVector, len(table))
 	for k, v := range table {
-		fs.jitterTable[k] = v
+		fs.jitterTable[k] = JitterVector(v)
 	}
 
 	// Clear cache when loading new table
 	fs.lruCache.Clear()
-
-	if fs.config.Verbose {
-		fmt.Printf("[FlashSearch] Loaded %d jitter vectors\n", len(table))
-	}
 }
 
-// Search performs a flash lookup for a jitter vector
-// This is the core "Flash Search" operation that simulates high-speed SRAM lookup
+// Search performs a flash lookup for a jitter vector using Dimension Shift
 func (fs *FlashSearcher) Search(hashKey uint32) (JitterVector, bool) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	// First, check the LRU cache for ultra-fast access
+	// 1. Check the LRU cache
 	if cached, found := fs.lruCache.Get(hashKey); found {
 		fs.stats.CacheHits++
 		return cached.(JitterVector), true
 	}
 
-	// Check the main jitter table
+	// 2. Exact match in jitter table
 	jitter, exists := fs.jitterTable[hashKey]
-
 	if exists {
 		fs.stats.Hits++
-		// Add to cache for future fast access
+		fs.lruCache.Add(hashKey, jitter)
+		return jitter, true
+	}
+
+	// 3. Nearest neighbor search (Recursive Pathfinder logic)
+	// Treats the hashKey as a coordinate in the Slot 0 space
+	if len(fs.jitterTable) > 0 {
+		var bestKey uint32
+		minDiff := uint32(math.MaxUint32)
+		
+		for k := range fs.jitterTable {
+			var diff uint32
+			if hashKey > k {
+				diff = hashKey - k
+			} else {
+				diff = k - hashKey
+			}
+			
+			if diff < minDiff {
+				minDiff = diff
+				bestKey = k
+			}
+		}
+		
+		jitter = fs.jitterTable[bestKey]
+		fs.stats.Hits++
 		fs.lruCache.Add(hashKey, jitter)
 		return jitter, true
 	}
@@ -110,121 +115,52 @@ func (fs *FlashSearcher) Search(hashKey uint32) (JitterVector, bool) {
 	fs.stats.Misses++
 	fs.stats.CacheMisses++
 
-	// Return default jitter with false to indicate not found
+	// Return default jitter
 	return fs.defaultJitter, false
 }
 
-// SearchFromHash extracts the lookup key from a hash and performs the search
-func (fs *FlashSearcher) SearchFromHash(hash [32]byte) (JitterVector, bool) {
-	key := ExtractLookupKey(hash)
-	return fs.Search(key)
-}
+// BuildFromTrainingData constructs a jitter table using Dimension Shift (Search 0, Retrieve 1)
+func (fs *FlashSearcher) BuildFromTrainingData(frames []TrainingFrame) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 
-// GenerateDefaultJitter creates a deterministic default jitter for a given key
-// Uses a simple hash-based fallback when no database entry exists
-func (fs *FlashSearcher) GenerateDefaultJitter(key uint32) JitterVector {
-	// XOR with a salt to create pseudo-random but deterministic jitter
-	salt := uint32(0x9E3779B9) // Golden ratio approximation
-	jitter := key ^ salt ^ (key >> 16)
-	return JitterVector(jitter)
-}
+	fs.jitterTable = make(map[uint32]JitterVector, len(frames))
 
-// GetOrGenerate returns a jitter vector, generating one if not found
-func (fs *FlashSearcher) GetOrGenerate(hashKey uint32) JitterVector {
-	jitter, found := fs.Search(hashKey)
-	if found {
-		return jitter
+	for _, frame := range frames {
+		// Key: Slot 0 (Subject coordinate)
+		// Value: Slot 1 (Jitter nudge)
+		fs.jitterTable[frame.AsicSlots[0]] = JitterVector(frame.AsicSlots[1])
 	}
 
-	// Generate deterministic jitter
-	return fs.GenerateDefaultJitter(hashKey)
+	if fs.config.Verbose {
+		fmt.Printf("[FlashSearch] Built Dimension-Shift table with %d entries\n", len(fs.jitterTable))
+	}
 }
 
 // GetStats returns current search statistics
 func (fs *FlashSearcher) GetStats() SearchStats {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-
-	return SearchStats{
-		Hits:         fs.stats.Hits,
-		Misses:       fs.stats.Misses,
-		CacheHits:    fs.stats.CacheHits,
-		CacheMisses:  fs.stats.CacheMisses,
-		TotalLatency: fs.stats.TotalLatency,
-	}
+	return *fs.stats
 }
 
-// ResetStats clears all statistics
 func (fs *FlashSearcher) ResetStats() {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-
 	fs.stats = &SearchStats{}
 }
 
-// Size returns the number of entries in the jitter table
 func (fs *FlashSearcher) Size() int {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-
 	return len(fs.jitterTable)
 }
 
-// AddJitter adds a new jitter vector to the table
-func (fs *FlashSearcher) AddJitter(hashKey uint32, jitter JitterVector) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	fs.jitterTable[hashKey] = jitter
-}
-
-// RemoveJitter removes a jitter vector from the table
-func (fs *FlashSearcher) RemoveJitter(hashKey uint32) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	delete(fs.jitterTable, hashKey)
-	fs.lruCache.Remove(hashKey)
-}
-
-// Clear removes all entries from the jitter table
-func (fs *FlashSearcher) Clear() {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	fs.jitterTable = make(map[uint32]JitterVector)
-	fs.lruCache.Clear()
-}
-
-// BuildFromTrainingData constructs a jitter table from training results
-// This creates the associative memory mapping between hash prefixes and optimal jitters
-func (fs *FlashSearcher) BuildFromTrainingData(records []WeightRecord) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	fs.jitterTable = make(map[uint32]JitterVector, len(records))
-
-	for _, record := range records {
-		// Use context key as the lookup key
-		// The jitter is derived from the best seed
-		if record.BestSeed != nil && len(record.BestSeed) >= 4 {
-			jitterValue := binary.LittleEndian.Uint32(record.BestSeed[:4])
-			fs.jitterTable[uint32(record.ContextKey)] = JitterVector(jitterValue)
-		}
-	}
-
-	if fs.config.Verbose {
-		fmt.Printf("[FlashSearch] Built jitter table with %d entries from training data\n", len(fs.jitterTable))
-	}
-}
-
-// WeightRecord represents a training result for building the jitter table
-type WeightRecord struct {
-	TokenID      int32
-	BestSeed     []byte
-	FitnessScore float64
-	Generation   int32
-	ContextKey   uint32
+// GenerateDefaultJitter creates a deterministic default jitter
+func (fs *FlashSearcher) GenerateDefaultJitter(key uint32) JitterVector {
+	salt := uint32(0x9E3779B9)
+	jitter := key ^ salt ^ (key >> 16)
+	return JitterVector(jitter)
 }
 
 // LRUCache implements a simple LRU cache for jitter vectors
@@ -243,7 +179,6 @@ type lruItem struct {
 	next  *lruItem
 }
 
-// NewLRUCache creates a new LRU cache with the given capacity
 func NewLRUCache(capacity int) *LRUCache {
 	cache := &LRUCache{
 		capacity: capacity,
@@ -256,79 +191,33 @@ func NewLRUCache(capacity int) *LRUCache {
 	return cache
 }
 
-// Get retrieves an item from the cache
 func (c *LRUCache) Get(key uint32) (interface{}, bool) {
 	c.mu.RLock()
 	item, exists := c.items[key]
 	c.mu.RUnlock()
-
 	if !exists {
 		return nil, false
 	}
-
 	c.mu.Lock()
 	c.moveToFront(item)
 	c.mu.Unlock()
-
 	return item.value, true
 }
 
-// Add inserts or updates an item in the cache
 func (c *LRUCache) Add(key uint32, value interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if item, exists := c.items[key]; exists {
 		item.value = value
 		c.moveToFront(item)
 		return
 	}
-
-	item := &lruItem{
-		key:   key,
-		value: value,
-	}
+	item := &lruItem{key: key, value: value}
 	c.items[key] = item
 	c.addToFront(item)
-
 	if len(c.items) > c.capacity {
 		c.removeLRU()
 	}
-}
-
-// Remove deletes an item from the cache
-func (c *LRUCache) Remove(key uint32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if item, exists := c.items[key]; exists {
-		c.removeItem(item)
-		delete(c.items, key)
-	}
-}
-
-// Clear removes all items from the cache
-func (c *LRUCache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.items = make(map[uint32]*lruItem)
-	c.head.next = c.tail
-	c.tail.prev = c.head
-}
-
-// Len returns the number of items in the cache
-func (c *LRUCache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.items)
-}
-
-func (c *LRUCache) addToFront(item *lruItem) {
-	item.next = c.head.next
-	item.prev = c.head
-	c.head.next.prev = item
-	c.head.next = item
 }
 
 func (c *LRUCache) moveToFront(item *lruItem) {
@@ -341,6 +230,13 @@ func (c *LRUCache) removeItem(item *lruItem) {
 	item.next.prev = item.prev
 }
 
+func (c *LRUCache) addToFront(item *lruItem) {
+	item.next = c.head.next
+	item.prev = c.head
+	c.head.next.prev = item
+	c.head.next = item
+}
+
 func (c *LRUCache) removeLRU() {
 	if len(c.items) == 0 {
 		return
@@ -348,4 +244,21 @@ func (c *LRUCache) removeLRU() {
 	lru := c.tail.prev
 	c.removeItem(lru)
 	delete(c.items, lru.key)
+}
+
+func (c *LRUCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[uint32]*lruItem)
+	c.head.next = c.tail
+	c.tail.prev = c.head
+}
+
+func (c *LRUCache) Remove(key uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if item, exists := c.items[key]; exists {
+		c.removeItem(item)
+		delete(c.items, key)
+	}
 }

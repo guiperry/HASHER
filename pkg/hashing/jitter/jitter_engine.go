@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/bits"
+	"net"
 )
 
 // JitterEngine executes the 21-pass temporal loop for dynamic associative hashing
@@ -90,6 +91,13 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 	passResults := make([]TemporalPassResult, 0, je.config.PassCount)
 	appliedJitters := make([]JitterVector, 0, je.config.PassCount)
 
+	// Attempt to connect to Jitter RPC Server for high-speed associative memory
+	var rpcConn net.Conn
+	var rpcErr error
+	if je.config.JitterSocketPath != "" {
+		rpcConn, rpcErr = net.Dial("unix", je.config.JitterSocketPath)
+	}
+
 	// Execute each pass
 	for pass := 0; pass < je.config.PassCount; pass++ {
 		state.Pass = pass
@@ -97,30 +105,37 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		// Step 1: Hash the current state
 		hash, err := je.hashMethod.ComputeDoubleHash(state.Header)
 		if err != nil {
+			if rpcConn != nil {
+				rpcConn.Close()
+			}
 			return nil, fmt.Errorf("hash computation failed at pass %d: %w", pass, err)
 		}
 
 		// Step 2: Extract lookup key from hash
 		lookupKey := ExtractLookupKey(hash)
 
-		// Step 3: Flash search for jitter vector
+		// Step 3: Flash search for jitter vector (Dimension Shift: Search 0, Retrieve 1)
 		var jitter JitterVector
 		var found bool
 
-		if je.config.EnableFlashSearch {
+		if rpcConn != nil && rpcErr == nil {
+			// Use high-speed Jitter RPC
+			jitter, found = je.getJitterRPC(rpcConn, lookupKey)
+		} else if je.config.EnableFlashSearch {
+			// In-memory lookup
 			jitter, found = je.searcher.Search(lookupKey)
-			if !found {
-				jitter = je.searcher.GenerateDefaultJitter(lookupKey)
-			}
-		} else {
-			// Generate deterministic jitter without database
+		}
+
+		if !found {
 			jitter = je.searcher.GenerateDefaultJitter(lookupKey)
-			found = false
 		}
 
 		// Step 4: Apply jitter to header (XOR into MerkleRoot)
 		err = XORJitterIntoHeader(state.Header, jitter)
 		if err != nil {
+			if rpcConn != nil {
+				rpcConn.Close()
+			}
 			return nil, fmt.Errorf("jitter application failed at pass %d: %w", pass, err)
 		}
 
@@ -141,13 +156,17 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		}
 	}
 
+	if rpcConn != nil {
+		rpcConn.Close()
+	}
+
 	// Compute final hash after all passes
 	finalHash, err := je.hashMethod.ComputeDoubleHash(state.Header)
 	if err != nil {
 		return nil, fmt.Errorf("final hash computation failed: %w", err)
 	}
 
-	// Extract golden nonce from final hash
+	// Extract golden nonce from final hash (first 4 bytes)
 	goldenNonce := binary.BigEndian.Uint32(finalHash[:4])
 
 	// Calculate metrics
@@ -158,6 +177,7 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		Nonce:           goldenNonce,
 		Found:           alignment >= 0.95, // Consider found if alignment is high
 		FinalHash:       finalHash,
+		FullSeed:        finalHash[:],
 		PassesCompleted: je.config.PassCount,
 		Stability:       stability,
 		Alignment:       alignment,
@@ -169,6 +189,20 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 	}
 
 	return result, nil
+}
+
+func (je *JitterEngine) getJitterRPC(conn net.Conn, hash uint32) (JitterVector, bool) {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, hash)
+	if _, err := conn.Write(buf); err != nil {
+		return 0, false
+	}
+
+	if _, err := conn.Read(buf); err != nil {
+		return 0, false
+	}
+
+	return JitterVector(binary.LittleEndian.Uint32(buf)), true
 }
 
 // Execute21PassLoopBatch processes multiple headers in batch
@@ -256,7 +290,7 @@ func (je *JitterEngine) HuntGoldenNonceBatch(
 		}
 
 		results[i] = result
-		frame.BestSeed = result.Nonce
+		frame.BestSeed = result.FullSeed
 	}
 
 	return results, nil

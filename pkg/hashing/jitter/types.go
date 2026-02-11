@@ -110,6 +110,9 @@ type GoldenNonceResult struct {
 	// Final hash after 21 passes
 	FinalHash [32]byte
 
+	// Full 32-byte seed result
+	FullSeed []byte
+
 	// Number of passes completed
 	PassesCompleted int
 
@@ -194,6 +197,9 @@ type JitterConfig struct {
 	// Whether to use database lookups for jitter
 	EnableFlashSearch bool
 
+	// Path to the jitter RPC socket
+	JitterSocketPath string
+
 	// Cache size for jitter table
 	JitterCacheSize int
 
@@ -207,6 +213,7 @@ func DefaultJitterConfig() *JitterConfig {
 		PassCount:         DefaultPassCount,
 		DefaultJitter:     JitterVector(0xDEADBEEF),
 		EnableFlashSearch: true,
+		JitterSocketPath:  "/tmp/jitter.sock",
 		JitterCacheSize:   10000,
 		Verbose:           false,
 	}
@@ -215,25 +222,25 @@ func DefaultJitterConfig() *JitterConfig {
 // TrainingFrame represents a training sample for the evolutionary process
 type TrainingFrame struct {
 	// Source file information
-	SourceFile string
+	SourceFile string `json:"source_file"`
 
 	// Chunk and window identifiers
-	ChunkID       int32
-	WindowStart   int32
-	WindowEnd     int32
-	ContextLength int32
+	ChunkID       int32 `json:"chunk_id"`
+	WindowStart   int32 `json:"window_start"`
+	WindowEnd     int32 `json:"window_end"`
+	ContextLength int32 `json:"context_length"`
 
 	// 12 ASIC slots (neural feature vector)
-	AsicSlots [12]uint32
+	AsicSlots [12]uint32 `json:"asic_slots"`
 
 	// Target token to predict
-	TargetTokenID int32
+	TargetTokenID int32 `json:"target_token_id"`
 
-	// Best seed found during training
-	BestSeed uint32
+	// Best seed found during training (32-byte Golden Nonce)
+	BestSeed []byte `json:"best_seed,omitempty"`
 
 	// Additional metadata
-	Metadata map[string]interface{}
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ToBitcoinHeader converts a TrainingFrame to an 80-byte Bitcoin header

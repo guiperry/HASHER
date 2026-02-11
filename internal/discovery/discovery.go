@@ -1,5 +1,5 @@
 // internal/hasher/discovery.go
-package hasher
+package discovery
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "hasher/internal/proto/hasher/v1"
+	"hasher/pkg/hashing/methods/asic"
 )
 
 // DiscoveryResult contains information about a discovered hasher-server
@@ -285,7 +286,7 @@ func FindBestServer(discoveries []DiscoveryResult) *DiscoveryResult {
 }
 
 // DiscoverAndConnect scans network and connects to the best available server
-func DiscoverAndConnect(config DiscoveryConfig) (*ASICClient, *DiscoveryResult, error) {
+func DiscoverAndConnect(config DiscoveryConfig) (*asic.ASICClient, *DiscoveryResult, error) {
 	discoveries, err := DiscoverServers(config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("network discovery failed: %w", err)
@@ -297,7 +298,7 @@ func DiscoverAndConnect(config DiscoveryConfig) (*ASICClient, *DiscoveryResult, 
 	}
 
 	// Connect to the best server
-	client, err := NewASICClient(best.Address)
+	client, err := asic.NewASICClient(best.Address)
 	if err != nil {
 		return nil, best, fmt.Errorf("failed to connect to best server %s: %w", best.Address, err)
 	}

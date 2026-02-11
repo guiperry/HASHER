@@ -15,8 +15,8 @@ import (
 
 	"hasher/internal/analyzer"
 	"hasher/internal/config"
-	"hasher/internal/hasher"
 	"hasher/internal/host/embedded"
+	"hasher/pkg/hashing/methods/asic"
 )
 
 func getDeviceConfig() config.DeviceConfig {
@@ -130,10 +130,10 @@ func (d *Deployer) rebootDevice(deviceIP string) error {
 }
 
 // EnsureServerDeployed ensures hasher-server is deployed and running on target device
-func (d *Deployer) EnsureServerDeployed(deviceIP string) (*hasher.ASICClient, error) {
+func (d *Deployer) EnsureServerDeployed(deviceIP string) (*asic.ASICClient, error) {
 	log.Printf("Ensuring hasher-server is deployed on device: %s", deviceIP)
 
-	var client *hasher.ASICClient // Declare client once
+	var client *asic.ASICClient // Declare client once
 	var err error                 // Declare err once
 
 	// If ForceRedeploy is true, skip checking existing server and always redeploy
@@ -198,10 +198,10 @@ func (d *Deployer) EnsureServerDeployed(deviceIP string) (*hasher.ASICClient, er
 }
 
 // checkExistingServer checks if hasher-server is already running on device
-func (d *Deployer) checkExistingServer(deviceIP string) (*hasher.ASICClient, error) {
+func (d *Deployer) checkExistingServer(deviceIP string) (*asic.ASICClient, error) {
 	address := fmt.Sprintf("%s:8888", deviceIP)
 
-	client, err := hasher.NewASICClient(address)
+	client, err := asic.NewASICClient(address)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (d *Deployer) deployHasherServer(deviceIP string) error {
 }
 
 // waitForServer waits for hasher-server to start and accepts connections
-func (d *Deployer) waitForServer(deviceIP string) (*hasher.ASICClient, error) {
+func (d *Deployer) waitForServer(deviceIP string) (*asic.ASICClient, error) {
 	address := fmt.Sprintf("%s:8888", deviceIP)
 
 	// Try connecting with exponential backoff
@@ -279,7 +279,7 @@ func (d *Deployer) waitForServer(deviceIP string) (*hasher.ASICClient, error) {
 		case <-timeout:
 			return nil, fmt.Errorf("timeout waiting for hasher-server to start")
 		default:
-			client, err := hasher.NewASICClient(address)
+			client, err := asic.NewASICClient(address)
 			if err == nil {
 				// Test the connection
 				if _, err := client.GetDeviceInfo(); err == nil {
@@ -397,7 +397,7 @@ func (d *Deployer) GetDeployedDevice() string {
 }
 
 // DeployWithDiscovery performs device discovery and deployment in one step
-func (d *Deployer) DeployWithDiscovery() (*hasher.ASICClient, error) {
+func (d *Deployer) DeployWithDiscovery() (*asic.ASICClient, error) {
 	log.Printf("Performing device discovery and deployment...")
 
 	// Run discovery

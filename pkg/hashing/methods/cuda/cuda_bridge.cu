@@ -13,17 +13,13 @@ __device__ const uint32_t K[64] = {
     0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-// SHA-256 round constants
+// SHA-256 round constants (specific to HASHER optimization)
 __device__ const uint32_t ROUND_CONSTANTS[64] = {
     0x46eae4e8, 0x5c4db124, 0x5ac42d4d, 0x3fc02aa4, 0x4a5d1c6d, 0x5f6c1a4f, 0x6a894aba, 0x7b8a6a3e,
     0x7fc08b16, 0x86d29778, 0x9447d0f3, 0xa8b7c2cd, 0xb50d4487, 0xc6e8bf8c, 0xd332b4ce, 0xd93da9bc, 0xe6ab5dc7,
     0xf34b6a2c, 0x0e575e0c, 0x12c8f462, 0x2184f8cd, 0x2c2f5c23, 0x2dcaba7c, 0x38a1be23, 0x409f1c92,
     0x46812b96, 0x541ab3ab, 0x5d235c0e, 0x6b6c2d2c, 0x749a51ad, 0x7884f5e3, 0x84e38a86, 0x8ccaa7b8, 0x98c495da,
     0xa4d1c4f3, 0xaf8c5d63, 0xb977f27b, 0xc49e51d6, 0xce475e87, 0xd63d4e83, 0xe23d4ecc, 0xea2cc3e4, 0xf0c8adcc
-};
-
-__device__ const uint32_t INITIAL_STATE[8] = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
 };
 
 // Right rotation function for SHA-256
@@ -100,11 +96,11 @@ __device__ void sha256_transform(uint32_t state[8], const uint32_t data[16]) {
 }
 
 /**
- * The "Camouflage" Kernel: Replicates the BM1382 hard-wired logic
+ * The Advanced "Camouflage" Kernel: Returns full 32-byte hash
  */
-__global__ void double_sha256_kernel(
+__global__ void double_sha256_full_kernel(
     const uint32_t* d_headers, // 80-byte headers (20 uint32s each)
-    uint32_t* d_results,       // Final hashes to compare against TargetTokenID
+    uint32_t* d_results,       // 32-byte hashes (8 uint32s each)
     int num_samples
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -114,8 +110,6 @@ __global__ void double_sha256_kernel(
     const uint32_t* header = &d_headers[idx * 20];
 
     // ROUND 1: Hash the 80-byte header
-    // SHA-256 processes 64-byte chunks. 80 bytes = 1.25 chunks.
-    // Chunk 1: bytes 0-63 | Chunk 2: bytes 64-79 + Padding
     uint32_t state[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
     
     // Process first 64 bytes
@@ -123,9 +117,9 @@ __global__ void double_sha256_kernel(
     
     // Process remaining 16 bytes (including the Nonce/Seed) + Padding
     uint32_t last_chunk[16] = {0};
-    last_chunk[0] = header[16]; // Timestamp
-    last_chunk[1] = header[17]; // Bits
-    last_chunk[2] = header[18]; // Nonce (Seed)
+    last_chunk[0] = header[16]; 
+    last_chunk[1] = header[17]; 
+    last_chunk[2] = header[18]; 
     last_chunk[3] = 0x80000000; // SHA-256 Padding bit
     last_chunk[15] = 640;       // Length in bits (80 * 8)
     sha256_transform(state, last_chunk);
@@ -138,13 +132,15 @@ __global__ void double_sha256_kernel(
     second_chunk[15] = 256;      // Length in bits
     sha256_transform(final_state, second_chunk);
 
-    // Store the first word of the final hash as the prediction coordinate
-    d_results[idx] = final_state[0];
+    // Store the full 32-byte final hash
+    for(int i = 0; i < 8; i++) {
+        d_results[idx * 8 + i] = final_state[i];
+    }
 }
 
 // Host function to launch CUDA kernel
 extern "C" {
-    int launch_double_sha256(
+    int launch_double_sha256_full(
         const uint32_t* headers,
         uint32_t* results,
         int num_samples,
@@ -154,31 +150,21 @@ extern "C" {
         // Allocate device memory
         uint32_t *d_headers, *d_results;
         cudaMalloc((void**)&d_headers, num_samples * 20 * sizeof(uint32_t));
-        cudaMalloc((void**)&d_results, num_samples * sizeof(uint32_t));
+        cudaMalloc((void**)&d_results, num_samples * 8 * sizeof(uint32_t));
         
         // Copy input data to device
         cudaMemcpy(d_headers, headers, num_samples * 20 * sizeof(uint32_t), cudaMemcpyHostToDevice);
         
         // Launch kernel
-        double_sha256_kernel<<<grid_size, block_size>>>(d_headers, d_results, num_samples);
+        double_sha256_full_kernel<<<grid_size, block_size>>>(d_headers, d_results, num_samples);
         
         // Copy results back to host
-        cudaMemcpy(results, d_results, num_samples * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(results, d_results, num_samples * 8 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
         
         // Cleanup
         cudaFree(d_headers);
         cudaFree(d_results);
         
         return cudaGetLastError();
-    }
-    
-    int get_cuda_device_count() {
-        int deviceCount = 0;
-        cudaGetDeviceCount(&deviceCount);
-        return deviceCount;
-    }
-    
-    void get_cuda_device_properties(int deviceId, cudaDeviceProp* props) {
-        cudaGetDeviceProperties(props, deviceId);
     }
 }

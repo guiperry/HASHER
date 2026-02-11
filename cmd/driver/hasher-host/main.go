@@ -29,7 +29,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"hasher/internal/config"
-	"hasher/internal/hasher"
+	"hasher/internal/discovery"
 	"hasher/internal/host"
 	"hasher/pkg/hashing/inference"
 	"hasher/pkg/hashing/methods/asic"
@@ -118,12 +118,12 @@ var (
 
 // Orchestrator manages the recursive inference process
 type Orchestrator struct {
-	asicClient      *hasher.ASICClient
+	asicClient      *asic.ASICClient
 	engine          *inference.RecursiveEngine
 	network         *neural.HashNetwork
 	cryptoModel     *transformer.HasherTransformer
 	miningNeuron    *neural.MiningNeuron // New field for Nonce generation
-	discoveryResult *hasher.DiscoveryResult
+	discoveryResult *discovery.DiscoveryResult
 	startTime       time.Time
 	mu              sync.RWMutex
 	deployer        *host.Deployer // For auto-deployment
@@ -267,8 +267,8 @@ func main() {
 	}
 
 	// Discover and connect to ASIC server
-	var asicClient *hasher.ASICClient
-	var discoveryResult *hasher.DiscoveryResult
+	var asicClient *asic.ASICClient
+	var discoveryResult *discovery.DiscoveryResult
 	var serverDeviceAddr string // Store the server device IP
 
 	if *device != "" {
@@ -357,7 +357,7 @@ func main() {
 				log.Printf("Falling back to localhost discovery...")
 
 				// Quick localhost check before full network discovery
-				asicClient, discoveryResult, err = hasher.DiscoverAndConnect(hasher.DiscoveryConfig{
+				asicClient, discoveryResult, err = discovery.DiscoverAndConnect(discovery.DiscoveryConfig{
 					Port:          *discoveryPort,
 					Timeout:       5 * time.Second, // Short timeout for localhost
 					Subnet:        "127.0.0.0/30",  // Very limited range
@@ -367,7 +367,7 @@ func main() {
 					log.Printf("Warning: Localhost discovery failed: %v", err)
 					log.Printf("Creating ASIC client for direct connection attempt...")
 					var clientErr error
-					asicClient, clientErr = hasher.NewASICClient("") // Create client for direct connection attempt
+					asicClient, clientErr = asic.NewASICClient("") // Create client for direct connection attempt
 					if clientErr != nil {
 						log.Printf("Warning: ASIC client creation failed: %v", clientErr)
 						asicClient = nil
@@ -386,7 +386,7 @@ func main() {
 		} else {
 			// Quick localhost discovery only when no deployer
 			log.Printf("Checking for local hasher-server...")
-			config := hasher.DiscoveryConfig{
+			config := discovery.DiscoveryConfig{
 				Port:          *discoveryPort,
 				Timeout:       5 * time.Second, // Short timeout for localhost
 				Subnet:        "127.0.0.0/30",  // Very limited range
@@ -397,12 +397,12 @@ func main() {
 			}
 
 			var err error
-			asicClient, discoveryResult, err = hasher.DiscoverAndConnect(config)
+			asicClient, discoveryResult, err = discovery.DiscoverAndConnect(config)
 			if err != nil {
 				log.Printf("Warning: Localhost discovery failed: %v", err)
 				log.Printf("Creating ASIC client for direct connection attempt...")
 				var clientErr error
-				asicClient, clientErr = hasher.NewASICClient("") // Create client for direct connection attempt
+				asicClient, clientErr = asic.NewASICClient("") // Create client for direct connection attempt
 				if clientErr != nil {
 					log.Printf("Warning: ASIC client creation failed: %v", clientErr)
 					asicClient = nil
@@ -419,7 +419,7 @@ func main() {
 		log.Printf("Trying localhost hasher-server...")
 		serverDeviceAddr = "localhost:8888"
 		var err error
-		asicClient, err = hasher.NewASICClient("localhost:8888")
+		asicClient, err = asic.NewASICClient("localhost:8888")
 		if err != nil {
 			log.Printf("Warning: Could not connect to localhost hasher-server: %v", err)
 			asicClient = nil
@@ -431,7 +431,7 @@ func main() {
 		log.Printf("No ASIC device available - enabling software fallback mode")
 		// Create a fallback ASIC client that will use software SHA-256
 		var clientErr error
-		asicClient, clientErr = hasher.NewASICClient("")
+		asicClient, clientErr = asic.NewASICClient("")
 		if clientErr != nil {
 			log.Printf("Warning: Failed to create software fallback client: %v", clientErr)
 			asicClient = nil
@@ -907,7 +907,7 @@ func (o *Orchestrator) reconnectASICClient() error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		client, err := hasher.NewASICClient(serverAddr)
+		client, err := asic.NewASICClient(serverAddr)
 		if err == nil {
 			// Test the connection
 			_, err := client.GetDeviceInfo()
@@ -1639,7 +1639,7 @@ func (o *Orchestrator) handleDiscoveryScan(c *gin.Context) {
 	}
 
 	// Create discovery config
-	config := hasher.NewDiscoveryConfig()
+	config := discovery.NewDiscoveryConfig()
 	if req.Subnet != "" {
 		config.Subnet = req.Subnet
 	}
@@ -1652,14 +1652,14 @@ func (o *Orchestrator) handleDiscoveryScan(c *gin.Context) {
 	config.SkipLocalhost = req.SkipLocal
 
 	// Perform discovery
-	discoveries, err := hasher.DiscoverServers(config)
+	discoveries, err := discovery.DiscoverServers(config)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Find best server
-	best := hasher.FindBestServer(discoveries)
+	best := discovery.FindBestServer(discoveries)
 
 	c.JSON(http.StatusOK, gin.H{
 		"discoveries": discoveries,

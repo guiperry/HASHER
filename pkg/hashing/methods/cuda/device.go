@@ -5,15 +5,17 @@ import (
 	"sync"
 
 	"hasher/pkg/hashing/core"
+	"hasher/pkg/hashing/jitter"
 )
 
 // CudaMethod implements the HashMethod interface for CUDA-accelerated hashing
 // This method is optimized for training pipeline only
 type CudaMethod struct {
-	bridge *CudaBridge
-	mutex  sync.RWMutex
-	canon  *core.CanonicalSHA256
-	caps   *core.Capabilities
+	bridge      *CudaBridge
+	mutex       sync.RWMutex
+	canon       *core.CanonicalSHA256
+	caps        *core.Capabilities
+	jitterTable map[uint32]uint32
 }
 
 // NewCudaMethod creates a new CUDA hashing method
@@ -21,8 +23,9 @@ func NewCudaMethod() *CudaMethod {
 	bridge := NewCudaBridge()
 
 	return &CudaMethod{
-		bridge: bridge,
-		canon:  core.NewCanonicalSHA256(),
+		bridge:      bridge,
+		canon:       core.NewCanonicalSHA256(),
+		jitterTable: make(map[uint32]uint32),
 	}
 }
 
@@ -194,32 +197,126 @@ func (m *CudaMethod) GetBridge() *CudaBridge {
 	return m.bridge
 }
 
+// CudaHashMethod implements jitter.HashMethod for CUDA
+type CudaHashMethod struct {
+	bridge *CudaBridge
+}
+
+func (c *CudaHashMethod) ComputeHash(data []byte) ([32]byte, error) {
+	return core.NewCanonicalSHA256().ComputeSHA256(data), nil
+}
+
+func (c *CudaHashMethod) ComputeDoubleHash(data []byte) ([32]byte, error) {
+	if len(data) == 80 && c.bridge != nil {
+		results, err := c.bridge.ComputeDoubleHashFull([][]byte{data})
+		if err == nil && len(results) > 0 {
+			return results[0], nil
+		}
+	}
+
+	h1 := core.NewCanonicalSHA256().ComputeSHA256(data)
+	return core.NewCanonicalSHA256().ComputeSHA256(h1[:]), nil
+}
+
+// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+func (m *CudaMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
+	if !m.IsAvailable() {
+		return nil, fmt.Errorf("CUDA not available")
+	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Create jitter engine
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterConfig.PassCount = passes
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	
+	// Set the hash method to use CUDA bridge
+	jitterEngine.SetHashMethod(&CudaHashMethod{bridge: m.bridge})
+
+	// Target doesn't matter for raw mining result
+	result, err := jitterEngine.Execute21PassLoop(header, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.FullSeed, nil
+}
+
 // Execute21PassLoop runs the 21-pass temporal loop with flash search jitter
 func (m *CudaMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*core.JitterResult, error) {
-	if m.bridge.GetDeviceCount() == 0 {
+	if !m.IsAvailable() {
 		return nil, fmt.Errorf("CUDA method not available")
 	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
 
 	if len(header) != 80 {
 		return nil, fmt.Errorf("header must be exactly 80 bytes")
 	}
 
-	// For CUDA method, we'll use a simplified implementation
-	// In a full implementation, this would use GPU kernels for the 21-pass loop
-	return nil, fmt.Errorf("CUDA 21-pass loop not yet implemented")
+	// Create jitter engine
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	
+	jitterEngine.SetHashMethod(&CudaHashMethod{bridge: m.bridge})
+
+	// Execute the 21-pass loop
+	result, err := jitterEngine.Execute21PassLoop(header, targetTokenID)
+	if err != nil {
+		return nil, fmt.Errorf("21-pass loop failed: %w", err)
+	}
+
+	// Convert jitter result to core result
+	jitterVectors := make([]uint32, len(result.JitterVectors))
+	for i, jv := range result.JitterVectors {
+		jitterVectors[i] = uint32(jv)
+	}
+
+	return &core.JitterResult{
+		Nonce:           result.Nonce,
+		Found:           result.Found,
+		FinalHash:       result.FinalHash,
+		PassesCompleted: result.PassesCompleted,
+		Stability:       result.Stability,
+		Alignment:       result.Alignment,
+		JitterVectors:   jitterVectors,
+		LatencyUs:       0,
+		Method:          m.Name(),
+		Metadata:        result.Metadata,
+	}, nil
 }
 
 // LoadJitterTable loads associative memory for flash search jitter lookup
 func (m *CudaMethod) LoadJitterTable(table map[uint32]uint32) error {
-	// TODO: Implement jitter table loading for CUDA
-	return fmt.Errorf("CUDA jitter table loading not yet implemented")
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.jitterTable = make(map[uint32]uint32, len(table))
+	for k, v := range table {
+		m.jitterTable[k] = v
+	}
+
+	return nil
 }
 
 // GetJitterStats returns jitter-specific statistics
 func (m *CudaMethod) GetJitterStats() map[string]interface{} {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	return map[string]interface{}{
-		"method":         m.Name(),
-		"jitter_enabled": false, // Not yet implemented
-		"cuda_available": m.bridge.GetDeviceCount() > 0,
+		"method":            m.Name(),
+		"jitter_enabled":    true,
+		"jitter_table_size": len(m.jitterTable),
+		"cuda_available":    m.bridge.GetDeviceCount() > 0,
 	}
 }

@@ -5,7 +5,21 @@
 // This file is an eBPF program and should be compiled separately with:
 //   clang -O2 -target bpf -c neural_kernel.c -o neural_kernel.o
 // It is NOT meant to be compiled as part of the regular Go build.
+
+// NOTE: __BPF__ is NOT defined here because this file is parsed by VS Code IntelliSense.
+// When compiling for actual eBPF, use: clang -D__BPF__ -target bpf ...
+// The SEC macro in ebpf_maps.h will work correctly for both cases.
+
+// VS Code IntelliSense workaround: provide fallback types
+// The C/C++ extension defines __INTELLISENSE__ when parsing
+#ifdef __INTELLISENSE__
+typedef unsigned char uint8_t;
+typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+#else
 #include <stdint.h>
+#endif
+
 #include <stddef.h>
 #include "ebpf_maps.h"
 

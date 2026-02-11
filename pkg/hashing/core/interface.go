@@ -33,6 +33,10 @@ type HashMethod interface {
 	// This is the core mechanism for dynamic associative hashing
 	Execute21PassLoop(header []byte, targetTokenID uint32) (*JitterResult, error)
 
+	// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+	// This represents the final 'Golden Seed' discovered by the pathfinder
+	ExecuteRecursiveMine(header []byte, passes int) ([]byte, error)
+
 	// LoadJitterTable loads associative memory for flash search jitter lookup
 	LoadJitterTable(table map[uint32]uint32) error
 
@@ -59,6 +63,9 @@ type Capabilities struct {
 
 	// Whether this method supports 21-pass temporal jitter
 	JitterSupported bool `json:"jitter_supported"`
+
+	// Whether this method supports advanced recursive pathfinding (21-pass loop)
+	RecursiveJitterSupported bool `json:"recursive_jitter_supported"`
 
 	// Maximum batch size for batch operations
 	MaxBatchSize int `json:"max_batch_size"`

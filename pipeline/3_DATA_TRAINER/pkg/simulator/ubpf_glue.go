@@ -22,21 +22,10 @@ func NewFlashSearcher(config *jitter.JitterConfig) *FlashSearcher {
 	}
 }
 
-// LoadJitterFromParquet loads jitter vectors from a parquet file
-// This now uses the actual implementation from the jitter package
+// LoadJitterFromParquet loads jitter vectors from a parquet file (Placeholder)
 func LoadJitterFromParquet(filename string) map[uint32]uint32 {
-	fmt.Printf("[FlashSearch] Loading jitter table from: %s\n", filename)
-
-	// Use the actual implementation
-	jitterTable := jitter.LoadJitterFromParquet(filename)
-
-	// Convert JitterVector to uint32 for compatibility
-	table := make(map[uint32]uint32, len(jitterTable))
-	for k, v := range jitterTable {
-		table[k] = uint32(v)
-	}
-
-	return table
+	fmt.Printf("[FlashSearch] Loading jitter table from: %s (PARQUET DEPRECATED, USE ARROW)\n", filename)
+	return make(map[uint32]uint32)
 }
 
 // Search performs a flash lookup for a jitter vector
@@ -47,13 +36,7 @@ func (fs *FlashSearcher) Search(hashKey uint32) (uint32, bool) {
 
 // LoadJitterTable loads a jitter table into the searcher
 func (fs *FlashSearcher) LoadJitterTable(table map[uint32]uint32) {
-	// Convert uint32 to JitterVector
-	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
-	for k, v := range table {
-		jitterTable[k] = jitter.JitterVector(v)
-	}
-
-	fs.searcher.LoadJitterTable(jitterTable)
+	fs.searcher.LoadJitterTable(table)
 }
 
 // GetStats returns search statistics

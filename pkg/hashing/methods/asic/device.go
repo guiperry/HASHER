@@ -10,9 +10,10 @@ import (
 
 // ASICMethod implements the HashMethod interface for direct ASIC hardware hashing
 type ASICMethod struct {
-	client *ASICClient
-	mutex  sync.RWMutex
-	caps   *core.Capabilities
+	client      *ASICClient
+	mutex       sync.RWMutex
+	caps        *core.Capabilities
+	jitterTable map[uint32]uint32
 }
 
 // NewASICMethod creates a new ASIC hashing method
@@ -24,7 +25,8 @@ func NewASICMethod(address string) *ASICMethod {
 	}
 
 	method := &ASICMethod{
-		client: client,
+		client:      client,
+		jitterTable: make(map[uint32]uint32),
 	}
 
 	// Initialize capabilities
@@ -223,9 +225,15 @@ func (m *ASICMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		return nil, fmt.Errorf("header must be exactly 80 bytes")
 	}
 
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	// Create jitter engine for this method
 	jitterConfig := jitter.DefaultJitterConfig()
 	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
 
 	// Set the hash method to use our ASIC implementation
 	jitterEngine.SetHashMethod(&ASICHASHMethod{client: m.client})
@@ -256,25 +264,56 @@ func (m *ASICMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 	}, nil
 }
 
-// LoadJitterTable loads associative memory for flash search jitter lookup
-func (m *ASICMethod) LoadJitterTable(table map[uint32]uint32) error {
-	// Convert uint32 to JitterVector
-	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
-	for k, v := range table {
-		jitterTable[k] = jitter.JitterVector(v)
+// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+func (m *ASICMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("ASIC client not initialized")
 	}
 
-	// Store for use in Execute21PassLoop
-	// TODO: Store this in the method instance
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Create jitter engine
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterConfig.PassCount = passes
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	
+	jitterEngine.SetHashMethod(&ASICHASHMethod{client: m.client})
+
+	// Target doesn't matter for raw mining result
+	result, err := jitterEngine.Execute21PassLoop(header, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.FullSeed, nil
+}
+
+// LoadJitterTable loads associative memory for flash search jitter lookup
+func (m *ASICMethod) LoadJitterTable(table map[uint32]uint32) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.jitterTable = make(map[uint32]uint32, len(table))
+	for k, v := range table {
+		m.jitterTable[k] = v
+	}
+
 	return nil
 }
 
 // GetJitterStats returns jitter-specific statistics
 func (m *ASICMethod) GetJitterStats() map[string]interface{} {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	stats := map[string]interface{}{
 		"method":            m.Name(),
 		"jitter_enabled":    true,
-		"jitter_table_size": 0, // TODO: Track actual table size
+		"jitter_table_size": len(m.jitterTable),
 	}
 
 	// Add ASIC-specific stats

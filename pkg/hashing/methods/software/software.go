@@ -15,12 +15,14 @@ type SoftwareMethod struct {
 	mutex       sync.RWMutex
 	canon       *core.CanonicalSHA256
 	caps        *core.Capabilities
+	jitterTable map[uint32]uint32
 }
 
 // NewSoftwareMethod creates a new software hashing method
 func NewSoftwareMethod() *SoftwareMethod {
 	return &SoftwareMethod{
-		canon: core.NewCanonicalSHA256(),
+		canon:       core.NewCanonicalSHA256(),
+		jitterTable: make(map[uint32]uint32),
 	}
 }
 
@@ -148,9 +150,15 @@ func (m *SoftwareMethod) Execute21PassLoop(header []byte, targetTokenID uint32) 
 		return nil, fmt.Errorf("header must be exactly 80 bytes")
 	}
 
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	// Create jitter engine for this method
 	jitterConfig := jitter.DefaultJitterConfig()
 	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
 
 	// Set the hash method to use our software implementation
 	jitterEngine.SetHashMethod(&SoftwareHashMethod{})
@@ -181,24 +189,55 @@ func (m *SoftwareMethod) Execute21PassLoop(header []byte, targetTokenID uint32) 
 	}, nil
 }
 
-// LoadJitterTable loads associative memory for flash search jitter lookup
-func (m *SoftwareMethod) LoadJitterTable(table map[uint32]uint32) error {
-	// Convert uint32 to JitterVector
-	jitterTable := make(map[uint32]jitter.JitterVector, len(table))
-	for k, v := range table {
-		jitterTable[k] = jitter.JitterVector(v)
+// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
+func (m *SoftwareMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
+	if !m.initialized {
+		return nil, fmt.Errorf("software method not initialized")
 	}
 
-	// Store for use in Execute21PassLoop
-	// TODO: Store this in the method instance
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Create jitter engine
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterConfig.PassCount = passes
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
+	
+	// Load associative memory
+	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	
+	jitterEngine.SetHashMethod(&SoftwareHashMethod{})
+
+	// Target doesn't matter for raw mining result, but we need one for the loop
+	result, err := jitterEngine.Execute21PassLoop(header, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.FullSeed, nil
+}
+
+// LoadJitterTable loads associative memory for flash search jitter lookup
+func (m *SoftwareMethod) LoadJitterTable(table map[uint32]uint32) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.jitterTable = make(map[uint32]uint32, len(table))
+	for k, v := range table {
+		m.jitterTable[k] = v
+	}
+
 	return nil
 }
 
 // GetJitterStats returns jitter-specific statistics
 func (m *SoftwareMethod) GetJitterStats() map[string]interface{} {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	return map[string]interface{}{
 		"method":            m.Name(),
 		"jitter_enabled":    true,
-		"jitter_table_size": 0, // TODO: Track actual table size
+		"jitter_table_size": len(m.jitterTable),
 	}
 }
