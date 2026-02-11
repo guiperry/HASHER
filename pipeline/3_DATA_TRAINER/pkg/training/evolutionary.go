@@ -22,6 +22,9 @@ const (
 )
 
 type TrainingRecord struct {
+	SourceFile    string     `json:"source_file"`
+	ChunkID       int32      `json:"chunk_id"`
+	WindowStart   int32      `json:"window_start"`
 	TokenSequence []int32    `json:"token_sequence"`
 	FeatureVector [12]uint32 `json:"feature_vector"`
 	TargetToken   int32      `json:"target_token"`
@@ -146,7 +149,7 @@ type SeedPopulation struct {
 
 type WeightRecord struct {
 	TokenID      int32   `json:"token_id"`
-	BestSeed     string  `json:"best_seed"`
+	BestSeed     []byte  `json:"best_seed"`
 	FitnessScore float64 `json:"fitness_score"`
 	Generation   int32   `json:"generation"`
 	ContextKey   uint32  `json:"context_key"`

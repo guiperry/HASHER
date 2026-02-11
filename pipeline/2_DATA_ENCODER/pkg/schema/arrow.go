@@ -39,7 +39,7 @@ func GetTrainingFrameArrowSchema() *arrow.Schema {
 		{Name: "asic_slot_10", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 		{Name: "asic_slot_11", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 		{Name: "target_token_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-		{Name: "best_seed", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "best_seed", Type: arrow.BinaryTypes.Binary, Nullable: true},
 	}, nil)
 }
 
@@ -250,7 +250,7 @@ func trainingFramesToArrowBatch(frames []TrainingFrame, mem memory.Allocator) (a
 	targetTokenIDBuilder := array.NewInt32Builder(mem)
 	defer targetTokenIDBuilder.Release()
 
-	bestSeedBuilder := array.NewStringBuilder(mem)
+	bestSeedBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
 	defer bestSeedBuilder.Release()
 
 	// Build arrays
@@ -273,7 +273,11 @@ func trainingFramesToArrowBatch(frames []TrainingFrame, mem memory.Allocator) (a
 		asicSlot10Builder.Append(frame.AsicSlots10)
 		asicSlot11Builder.Append(frame.AsicSlots11)
 		targetTokenIDBuilder.Append(frame.TargetTokenID)
-		bestSeedBuilder.Append(frame.BestSeed)
+		if frame.BestSeed != nil {
+			bestSeedBuilder.Append(frame.BestSeed)
+		} else {
+			bestSeedBuilder.AppendNull()
+		}
 	}
 
 	// Build arrays

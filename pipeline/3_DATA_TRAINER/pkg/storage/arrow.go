@@ -33,7 +33,7 @@ func GetTrainingRecordArrowSchema() *arrow.Schema {
 		{Name: "asic_slot_10", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 		{Name: "asic_slot_11", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 		{Name: "target_token_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-		{Name: "best_seed", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "best_seed", Type: arrow.BinaryTypes.Binary, Nullable: true},
 	}, nil)
 }
 
@@ -77,7 +77,10 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 	var records []*training.TrainingRecord
 
 	// Get columns - matches the schema from Data Encoder
+	sourceFileCol := batch.Column(0).(*array.String)
 	chunkIDCol := batch.Column(1).(*array.Int32)
+	windowStartCol := batch.Column(2).(*array.Int32)
+	
 	asicSlot0Col := batch.Column(5).(*array.Int32)
 	asicSlot1Col := batch.Column(6).(*array.Int32)
 	asicSlot2Col := batch.Column(7).(*array.Int32)
@@ -91,9 +94,32 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 	asicSlot10Col := batch.Column(15).(*array.Int32)
 	asicSlot11Col := batch.Column(16).(*array.Int32)
 	targetTokenCol := batch.Column(17).(*array.Int32)
+	
+	var bestSeedCol array.Interface
+	if batch.NumCols() > 18 {
+		bestSeedCol = batch.Column(18)
+	}
 
 	// Convert each row
 	for i := 0; i < int(batch.NumRows()); i++ {
+		// Skip records that already have a best seed
+		if bestSeedCol != nil && !bestSeedCol.IsNull(i) {
+			hasSeed := false
+			switch col := bestSeedCol.(type) {
+			case *array.Binary:
+				if len(col.Value(i)) > 0 {
+					hasSeed = true
+				}
+			case *array.String:
+				if len(col.Value(i)) > 0 {
+					hasSeed = true
+				}
+			}
+			if hasSeed {
+				continue
+			}
+		}
+
 		// Map ASIC slots to FeatureVector
 		var featureVector [12]uint32
 		featureVector[0] = uint32(asicSlot0Col.Value(i))
@@ -114,6 +140,9 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 		contextHash := uint32(chunkIDCol.Value(i)) // Using ChunkID as context identifier
 
 		records = append(records, &training.TrainingRecord{
+			SourceFile:    sourceFileCol.Value(i),
+			ChunkID:       chunkIDCol.Value(i),
+			WindowStart:   windowStartCol.Value(i),
 			TokenSequence: []int32{targetToken}, // Simple token sequence for now
 			FeatureVector: featureVector,
 			TargetToken:   targetToken,
@@ -155,62 +184,62 @@ func WriteTrainingRecordsToArrowIPC(filePath string, records []*training.Trainin
 func trainingRecordsToArrowBatch(records []*training.TrainingRecord, mem memory.Allocator) (array.Record, error) {
 	schema := GetTrainingRecordArrowSchema()
 
-	// Create builders for each field
-	tokenSequenceBuilder := array.NewListBuilder(mem, arrow.PrimitiveTypes.Int32)
-	defer tokenSequenceBuilder.Release()
+	// Create builders
+	sourceFileBuilder := array.NewStringBuilder(mem)
+	defer sourceFileBuilder.Release()
+	
+	chunkIDBuilder := array.NewInt32Builder(mem)
+	defer chunkIDBuilder.Release()
+	
+	windowStartBuilder := array.NewInt32Builder(mem)
+	defer windowStartBuilder.Release()
+	
+	windowEndBuilder := array.NewInt32Builder(mem)
+	defer windowEndBuilder.Release()
+	
+	contextLengthBuilder := array.NewInt32Builder(mem)
+	defer contextLengthBuilder.Release()
 
-	featureVectorBuilder := array.NewFixedSizeListBuilder(mem, 12, arrow.PrimitiveTypes.Uint32)
-	defer featureVectorBuilder.Release()
+	asicBuilders := make([]*array.Int32Builder, 12)
+	for i := range asicBuilders {
+		asicBuilders[i] = array.NewInt32Builder(mem)
+		defer asicBuilders[i].Release()
+	}
 
 	targetTokenBuilder := array.NewInt32Builder(mem)
 	defer targetTokenBuilder.Release()
 
-	contextHashBuilder := array.NewUint32Builder(mem)
-	defer contextHashBuilder.Release()
+	bestSeedBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	defer bestSeedBuilder.Release()
 
 	// Build arrays
 	for _, record := range records {
-		// Build token sequence
-		if record.TokenSequence != nil {
-			tokenSequenceBuilder.Append(true)
-			tb := tokenSequenceBuilder.ValueBuilder().(*array.Int32Builder)
-			tb.AppendValues(record.TokenSequence, nil)
-		} else {
-			tokenSequenceBuilder.AppendNull()
+		sourceFileBuilder.Append(record.SourceFile)
+		chunkIDBuilder.Append(record.ChunkID)
+		windowStartBuilder.Append(record.WindowStart)
+		windowEndBuilder.Append(0) // Default
+		contextLengthBuilder.Append(0) // Default
+		
+		for i := 0; i < 12; i++ {
+			asicBuilders[i].Append(int32(record.FeatureVector[i]))
 		}
 
-		// Build feature vector
-		featureVectorBuilder.Append(true)
-		fvb := featureVectorBuilder.ValueBuilder().(*array.Uint32Builder)
-		for _, val := range record.FeatureVector {
-			fvb.Append(val)
-		}
-
-		// Build other fields
 		targetTokenBuilder.Append(record.TargetToken)
-		if record.ContextHash != 0 {
-			contextHashBuilder.Append(record.ContextHash)
-		} else {
-			contextHashBuilder.AppendNull()
-		}
+		bestSeedBuilder.AppendNull()
 	}
 
-	// Build arrays
-	tokenSequenceArr := tokenSequenceBuilder.NewArray()
-	defer tokenSequenceArr.Release()
-
-	featureVectorArr := featureVectorBuilder.NewArray()
-	defer featureVectorArr.Release()
-
-	targetTokenArr := targetTokenBuilder.NewArray()
-	defer targetTokenArr.Release()
-
-	contextHashArr := contextHashBuilder.NewArray()
-	defer contextHashArr.Release()
-
-	// Create record - use type assertion to []Interface
+	// Build final arrays
 	var cols []array.Interface
-	cols = append(cols, tokenSequenceArr, featureVectorArr, targetTokenArr, contextHashArr)
+	cols = append(cols, sourceFileBuilder.NewArray())
+	cols = append(cols, chunkIDBuilder.NewArray())
+	cols = append(cols, windowStartBuilder.NewArray())
+	cols = append(cols, windowEndBuilder.NewArray())
+	cols = append(cols, contextLengthBuilder.NewArray())
+	for i := range asicBuilders {
+		cols = append(cols, asicBuilders[i].NewArray())
+	}
+	cols = append(cols, targetTokenBuilder.NewArray())
+	cols = append(cols, bestSeedBuilder.NewArray())
 
 	return array.NewRecord(schema, cols, int64(len(records))), nil
 }

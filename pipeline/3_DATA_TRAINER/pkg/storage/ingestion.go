@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/lab/hasher/data-trainer/pkg/training"
+	"github.com/apache/arrow/go/arrow/ipc"
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go/reader"
 )
@@ -56,7 +57,7 @@ type ParquetTrainingRecord struct {
 	TargetTokenID int32 `parquet:"name=target_token_id, type=INT32"`
 
 	// Seed (placeholder for Stage 3)
-	BestSeed string `parquet:"name=best_seed, type=BYTE_ARRAY, convertedtype=UTF8"`
+	BestSeed []byte `parquet:"name=best_seed, type=BYTE_ARRAY"`
 }
 
 type DataIngestor struct {
@@ -245,7 +246,7 @@ func (di *DataIngestor) getAvailableFiles() ([]string, error) {
 		}
 		if strings.HasSuffix(strings.ToLower(info.Name()), ".parquet") {
 			files = append(files, path)
-		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".json") && !strings.Contains(strings.ToLower(info.Name()), ".checkpoint.") {
 			files = append(files, path)
 		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".arrow") {
 			files = append(files, path)
@@ -320,6 +321,36 @@ func (di *DataIngestor) GetTotalRecords() (int64, error) {
 }
 
 func (di *DataIngestor) countRecordsInFile(filePath string) (int64, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".json" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return 0, err
+		}
+		var records []interface{}
+		if err := json.Unmarshal(data, &records); err != nil {
+			return 0, err
+		}
+		return int64(len(records)), nil
+	} else if ext == ".arrow" {
+		file, err := os.Open(filePath)
+		if err != nil {
+			return 0, err
+		}
+		defer file.Close()
+		r, err := ipc.NewReader(file)
+		if err != nil {
+			return 0, err
+		}
+		defer r.Release()
+		var total int64
+		for r.Next() {
+			batch := r.Record()
+			total += batch.NumRows()
+		}
+		return total, nil
+	}
+
 	fr, err := local.NewLocalFileReader(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create file reader: %w", err)
@@ -392,7 +423,6 @@ func formatBytes(bytes int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
-
 
 func (di *DataIngestor) readJSONFile(filePath string) ([]*training.TrainingRecord, error) {
 	file, err := os.Open(filePath)
@@ -523,7 +553,15 @@ func (di *DataIngestor) readCSVAndConvert(csvPath string) ([]*training.TrainingR
 }
 
 func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.TrainingRecord {
+	// Skip records that already have a best seed
+	if len(jr.BestSeed) > 0 {
+		return nil
+	}
+
 	record := &training.TrainingRecord{
+		SourceFile:    jr.SourceFile,
+		ChunkID:       jr.ChunkID,
+		WindowStart:   jr.WindowStart,
 		TargetToken: jr.TargetTokenID,
 		ContextHash: uint32(jr.ChunkID), // Using ChunkID as context identifier
 	}
@@ -544,7 +582,15 @@ func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.Trai
 }
 
 func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *training.TrainingRecord {
+	// Skip records that already have a best seed
+	if len(pr.BestSeed) > 0 {
+		return nil
+	}
+
 	record := &training.TrainingRecord{
+		SourceFile:    pr.SourceFile,
+		ChunkID:       pr.ChunkID,
+		WindowStart:   pr.WindowStart,
 		TargetToken: pr.TargetTokenID,
 		ContextHash: uint32(pr.ChunkID), // Using ChunkID as context identifier
 	}
@@ -735,7 +781,6 @@ func (di *DataIngestor) processFileWithCheckpoints(filePath string, stats *Inges
 
 	return records, nil
 }
-
 
 // ProcessAllFiles is the original method - now delegates to ProcessAllFilesWithProgress
 func (di *DataIngestor) ProcessAllFiles(progressChan chan<- *IngestionStats) ([]*training.TrainingRecord, error) {

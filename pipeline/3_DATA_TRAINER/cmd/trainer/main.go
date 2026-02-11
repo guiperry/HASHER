@@ -36,7 +36,7 @@ var (
 )
 
 type seedWriterInterface interface {
-	AddSeedWrite(tokenID int32, bestSeed []byte) error
+	AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error
 	WriteBack() error
 	GetOutputFile() string
 }
@@ -182,6 +182,13 @@ func main() {
 		sig := <-sigChan
 		logger.Info("Received signal %v, shutting down...", sig)
 		cancel()
+
+		// Force exit if graceful shutdown takes too long
+		go func() {
+			time.Sleep(5 * time.Second)
+			logger.Warn("Graceful shutdown timed out, forcing exit")
+			os.Exit(1)
+		}()
 	}()
 
 	if err := orchestrator.Run(ctx, *maxEpochs, *population); err != nil {
@@ -272,7 +279,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	to.dataIngestor = dataIngestor.DataIngestor
 
 	to.logger.Info("Initializing seed writer for write-back...")
-	seedWriter := storage.NewJSONSeedWriter(trainingDataPath)
+	seedWriter := storage.NewDualSeedWriter(to.dataPath)
 	to.seedWriter = seedWriter
 
 	trainingRecords, err := dataIngestor.ProcessAllFiles(nil)
@@ -487,7 +494,7 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 			// Winning condition: passes difficulty mask OR has very high advantage
 			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(record.TargetToken)) {
 				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", record.TargetToken, gen)
-				return to.saveWinningSeed(record.TargetToken, bestSeed, gen)
+				return to.saveWinningSeed(record, bestSeed, gen)
 			}
 			// Also accept if advantage is very high AND meets a minimum quality threshold
 			if bestSeed.Advantage > 2.0 {
@@ -495,7 +502,7 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 				matchingBits := bits.LeadingZeros32(diff)
 				if matchingBits >= 16 { // Require at least 16 bits of similarity for a high-advantage win
 					to.logger.Info("[WIN] Token %d: Found winning seed in gen %d (high advantage=%.2f, %d bits)", record.TargetToken, gen, bestSeed.Advantage, matchingBits)
-					return to.saveWinningSeed(record.TargetToken, bestSeed, gen)
+					return to.saveWinningSeed(record, bestSeed, gen)
 				}
 			}
 		}
@@ -534,6 +541,7 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 
 	// Create a TrainingRecord for the targetToken
 	record := &training.TrainingRecord{
+		SourceFile:    "synthetic",
 		TargetToken:   targetToken,
 		TokenSequence: []int32{targetToken},
 		ContextHash:   training.ComputeContextHash([]int32{targetToken}, 5),
@@ -558,12 +566,12 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 			// Winning condition: passes difficulty mask OR has very high advantage
 			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(targetToken)) {
 				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", targetToken, gen)
-				return to.saveWinningSeed(targetToken, bestSeed, gen)
+				return to.saveWinningSeed(record, bestSeed, gen)
 			}
 			// Also accept if advantage is very high (converged solution)
 			if bestSeed.Advantage > 2.0 {
 				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (high advantage=%.2f)", targetToken, gen, bestSeed.Advantage)
-				return to.saveWinningSeed(targetToken, bestSeed, gen)
+				return to.saveWinningSeed(record, bestSeed, gen)
 			}
 		}
 
@@ -585,22 +593,22 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 	return nil
 }
 
-func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training.SeedResult, generation int) error {
+func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord, seed training.SeedResult, generation int) error {
 	weightRecord := storage.WeightRecord{
-		TokenID:      targetToken,
-		BestSeed:     string(seed.Seed),
+		TokenID:      record.TargetToken,
+		BestSeed:     seed.Seed,
 		FitnessScore: seed.Reward,
 		Generation:   int32(generation),
-		ContextKey:   training.ComputeContextHash([]int32{targetToken}, 5),
+		ContextKey:   record.ContextHash,
 	}
 
-	layerID := int32(targetToken / 100)
+	layerID := int32(record.TargetToken / 100)
 	if err := to.storage.SaveWeights([]storage.WeightRecord{weightRecord}, layerID); err != nil {
 		return fmt.Errorf("failed to save weight: %w", err)
 	}
 
 	checkpointEntry := training.CheckpointEntry{
-		TokenID:      targetToken,
+		TokenID:      record.TargetToken,
 		SeedHash:     storage.ComputeSeedHash(seed.Seed),
 		BestSeed:     seed.Seed,
 		FitnessScore: seed.Reward,
@@ -611,18 +619,18 @@ func (to *TrainingOrchestrator) saveWinningSeed(targetToken int32, seed training
 		return fmt.Errorf("failed to save checkpoint: %w", err)
 	}
 
-	// Immediately write best seed back to training_frames.parquet
-	if err := to.seedWriter.AddSeedWrite(targetToken, seed.Seed); err != nil {
-		to.logger.Warn("Failed to queue seed write-back for token %d: %v", targetToken, err)
+	// Immediately write best seed back to JSON output
+	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.ChunkID, record.WindowStart, seed.Seed); err != nil {
+		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {
 		if err := to.seedWriter.WriteBack(); err != nil {
-			to.logger.Error("Failed to write seed back to parquet: %v", err)
+			to.logger.Error("Failed to write seed back to JSON: %v", err)
 		} else {
-			to.logger.Info("Wrote best seed for token %d to %s", targetToken, filepath.Base(to.seedWriter.GetOutputFile()))
+			to.logger.Info("Wrote best seed for token %d to %s", record.TargetToken, filepath.Base(to.seedWriter.GetOutputFile()))
 		}
 	}
 
-	to.logger.Info("Saved checkpoint for token %d (fitness=%.4f) [gen=%d]", targetToken, seed.Reward, generation)
+	to.logger.Info("Saved checkpoint for token %d (fitness=%.4f) [gen=%d]", record.TargetToken, seed.Reward, generation)
 	return nil
 }
 

@@ -32,14 +32,14 @@ func TestCSVStorageSaveAndLoadWeights(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
 		},
 		{
 			TokenID:      43,
-			BestSeed:     "\x05\x06\x07\x08",
+			BestSeed:     []byte("\x05\x06\x07\x08"),
 			FitnessScore: 0.87,
 			Generation:   2,
 			ContextKey:   12346,
@@ -94,7 +94,7 @@ func TestCSVStorageListLayers(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
@@ -133,14 +133,14 @@ func TestCSVStorageGetLayerMetadata(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
 		},
 		{
 			TokenID:      43,
-			BestSeed:     "\x05\x06\x07\x08",
+			BestSeed:     []byte("\x05\x06\x07\x08"),
 			FitnessScore: 0.87,
 			Generation:   2,
 			ContextKey:   12346,
@@ -185,7 +185,7 @@ func TestCSVStorageDeleteLayer(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
@@ -220,21 +220,21 @@ func TestCSVStorageWeightQuery(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
 		},
 		{
 			TokenID:      43,
-			BestSeed:     "\x05\x06\x07\x08",
+			BestSeed:     []byte("\x05\x06\x07\x08"),
 			FitnessScore: 0.87,
 			Generation:   2,
 			ContextKey:   12346,
 		},
 		{
 			TokenID:      44,
-			BestSeed:     "\x09\x0A\x0B\x0C",
+			BestSeed:     []byte("\x09\x0A\x0B\x0C"),
 			FitnessScore: 0.92,
 			Generation:   1,
 			ContextKey:   12347,
@@ -299,7 +299,7 @@ func TestCSVStorageGetStorageStats(t *testing.T) {
 	weights := []WeightRecord{
 		{
 			TokenID:      42,
-			BestSeed:     "\x01\x02\x03\x04",
+			BestSeed:     []byte("\x01\x02\x03\x04"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   12345,
@@ -329,7 +329,7 @@ func BenchmarkCSVStorageSaveWeights(b *testing.B) {
 	for i := range weights {
 		weights[i] = WeightRecord{
 			TokenID:      int32(i),
-			BestSeed:     "test_seed",
+			BestSeed:     []byte("test_seed"),
 			FitnessScore: 0.95,
 			Generation:   1,
 			ContextKey:   uint32(i),
