@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"path/filepath"
 	"sync"
 )
 
@@ -23,13 +22,16 @@ func NewArrowSeedWriter(sourceFile, outputFile string) *ArrowSeedWriter {
 	}
 }
 
-// generateKey creates a unique key for a specific training frame
-func (aw *ArrowSeedWriter) generateKey(sourceFile string, chunkID int32, windowStart int32) string {
-	return fmt.Sprintf("%s:%d:%d", filepath.Base(sourceFile), chunkID, windowStart)
+// generateAsicKey creates a unique key based on 12 ASIC slots
+func (aw *ArrowSeedWriter) generateAsicKey(slots [12]uint32) string {
+	return fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+		slots[0], slots[1], slots[2], slots[3],
+		slots[4], slots[5], slots[6], slots[7],
+		slots[8], slots[9], slots[10], slots[11])
 }
 
-// AddSeedWrite queues a best seed to be written back
-func (aw *ArrowSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error {
+// AddSeedWrite queues a best seed using ASIC slots
+func (aw *ArrowSeedWriter) AddSeedWrite(slots [12]uint32, bestSeed []byte) error {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
@@ -37,7 +39,7 @@ func (aw *ArrowSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, window
 		return fmt.Errorf("cannot write empty seed")
 	}
 
-	key := aw.generateKey(sourceFile, chunkID, windowStart)
+	key := aw.generateAsicKey(slots)
 	aw.pendingWrites[key] = bestSeed
 	return nil
 }
@@ -59,7 +61,7 @@ func (aw *ArrowSeedWriter) WriteBack() error {
 
 	updated := 0
 	for _, record := range records {
-		key := aw.generateKey(record.SourceFile, record.ChunkID, record.WindowStart)
+		key := aw.generateAsicKey(record.FeatureVector)
 
 		if seed, ok := aw.pendingWrites[key]; ok {
 			record.BestSeed = seed

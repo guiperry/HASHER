@@ -8,21 +8,12 @@ import (
 	"sync"
 )
 
-// JSONTrainingRecord is used for JSON matching during write-back
-type JSONTrainingRecordWithMetadata struct {
-	SourceFile    string `json:"source_file"`
-	ChunkID       int32  `json:"chunk_id"`
-	WindowStart   int32  `json:"window_start"`
-	TargetTokenID int32  `json:"target_token_id"`
-	BestSeed      []byte `json:"best_seed,omitempty"`
-}
-
-// JSONSeedWriter handles writing best seeds back to JSON with precise frame matching
+// JSONSeedWriter handles writing best seeds back to JSON with precise ASIC slot matching
 type JSONSeedWriter struct {
 	sourceFile    string
 	outputFile    string
 	mu            sync.Mutex
-	pendingWrites map[string][]byte // composite key (file+chunk+window) -> best_seed
+	pendingWrites map[string][]byte // composite key (asic_slots) -> best_seed
 }
 
 // NewJSONSeedWriter creates a new JSONSeedWriter
@@ -34,13 +25,16 @@ func NewJSONSeedWriter(sourceFile, outputFile string) *JSONSeedWriter {
 	}
 }
 
-// generateKey creates a unique key for a specific training frame
-func (sw *JSONSeedWriter) generateKey(sourceFile string, chunkID int32, windowStart int32) string {
-	return fmt.Sprintf("%s:%d:%d", filepath.Base(sourceFile), chunkID, windowStart)
+// generateAsicKey creates a unique key for a frame based on its 12 ASIC slots
+func (sw *JSONSeedWriter) generateAsicKey(slots [12]uint32) string {
+	return fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+		slots[0], slots[1], slots[2], slots[3],
+		slots[4], slots[5], slots[6], slots[7],
+		slots[8], slots[9], slots[10], slots[11])
 }
 
-// AddSeedWrite queues a best seed to be written back with full metadata context
-func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error {
+// AddSeedWrite queues a best seed using ASIC slots as the unique identifier
+func (sw *JSONSeedWriter) AddSeedWrite(slots [12]uint32, bestSeed []byte) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -48,8 +42,8 @@ func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowS
 		return fmt.Errorf("cannot write empty seed")
 	}
 
-	key := sw.generateKey(sourceFile, chunkID, windowStart)
-	fmt.Printf("[DEBUG] Queuing seed for key: %s\n", key)
+	key := sw.generateAsicKey(slots)
+	fmt.Printf("[DEBUG] SeedWriter: Queuing seed for ASIC key (Slot0=%d)\n", slots[0])
 	sw.pendingWrites[key] = bestSeed
 	return nil
 }
@@ -64,17 +58,13 @@ func (sw *JSONSeedWriter) WriteBack() error {
 	}
 
 	fmt.Printf("[DEBUG] SeedWriter: Writing back %d pending seeds\n", len(sw.pendingWrites))
-	for k := range sw.pendingWrites {
-		fmt.Printf("[DEBUG] Pending key: %s\n", k)
-	}
 
-	// 1. Read existing file (ingestion source)
+	// 1. Read existing file
 	data, err := os.ReadFile(sw.sourceFile)
 	if err != nil {
 		return fmt.Errorf("failed to read source JSON file: %w", err)
 	}
 
-	// Unmarshal into a generic map or slice of maps to preserve all fields
 	var records []map[string]interface{}
 	if err := json.Unmarshal(data, &records); err != nil {
 		return fmt.Errorf("failed to unmarshal JSON: %w", err)
@@ -84,27 +74,33 @@ func (sw *JSONSeedWriter) WriteBack() error {
 	for i := range records {
 		record := records[i]
 		
-		// Extract metadata for key generation - support both snake_case and PascalCase
-		sourceFile, _ := record["source_file"].(string)
-		if sourceFile == "" {
-			sourceFile, _ = record["SourceFile"].(string)
+		// Extract ASIC slots to form the key
+		var slots [12]uint32
+		foundAll := true
+		for j := 0; j < 12; j++ {
+			key := fmt.Sprintf("asic_slot_%d", j)
+			val, ok := record[key].(float64)
+			if !ok {
+				// Try PascalCase
+				key = fmt.Sprintf("AsicSlots%d", j)
+				val, ok = record[key].(float64)
+			}
+			
+			if ok {
+				slots[j] = uint32(val)
+			} else {
+				foundAll = false
+				break
+			}
 		}
 
-		chunkIDRaw, ok := record["chunk_id"].(float64)
-		if !ok {
-			chunkIDRaw, _ = record["ChunkID"].(float64)
+		if !foundAll {
+			continue
 		}
 
-		windowStartRaw, ok := record["window_start"].(float64)
-		if !ok {
-			windowStartRaw, _ = record["WindowStart"].(float64)
-		}
-		
-		key := sw.generateKey(sourceFile, int32(chunkIDRaw), int32(windowStartRaw))
-		
+		key := sw.generateAsicKey(slots)
 		if seed, ok := sw.pendingWrites[key]; ok {
-			fmt.Printf("[DEBUG] MATCH FOUND for key: %s\n", key)
-			// Update the record - use original case if present, otherwise snake_case
+			// Update the record
 			if _, exists := record["best_seed"]; exists {
 				record["best_seed"] = seed
 			} else if _, exists := record["BestSeed"]; exists {
@@ -116,7 +112,7 @@ func (sw *JSONSeedWriter) WriteBack() error {
 		}
 	}
 
-	// 3. Write back with indentation
+	// 3. Write back
 	newData, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -144,7 +140,7 @@ type DualSeedWriter struct {
 	arrowWriter *ArrowSeedWriter
 }
 
-// NewDualSeedWriter creates a new DualSeedWriter that targets both JSON and Arrow
+// NewDualSeedWriter creates a new DualSeedWriter
 func NewDualSeedWriter(dataPath string) *DualSeedWriter {
 	framesDir := filepath.Join(dataPath, "frames")
 	jsonSource := filepath.Join(framesDir, "training_frames.json")
@@ -158,12 +154,12 @@ func NewDualSeedWriter(dataPath string) *DualSeedWriter {
 	}
 }
 
-// AddSeedWrite redirects to both writers
-func (dsw *DualSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error {
-	if err := dsw.jsonWriter.AddSeedWrite(sourceFile, chunkID, windowStart, bestSeed); err != nil {
+// AddSeedWrite redirects to both writers using ASIC slots
+func (dsw *DualSeedWriter) AddSeedWrite(slots [12]uint32, bestSeed []byte) error {
+	if err := dsw.jsonWriter.AddSeedWrite(slots, bestSeed); err != nil {
 		return err
 	}
-	return dsw.arrowWriter.AddSeedWrite(sourceFile, chunkID, windowStart, bestSeed)
+	return dsw.arrowWriter.AddSeedWrite(slots, bestSeed)
 }
 
 // WriteBack commits pending writes to both outputs
@@ -174,7 +170,7 @@ func (dsw *DualSeedWriter) WriteBack() error {
 	return dsw.arrowWriter.WriteBack()
 }
 
-// GetOutputFile returns the primary output file path (JSON)
+// GetOutputFile returns the primary output file path
 func (dsw *DualSeedWriter) GetOutputFile() string {
 	return dsw.jsonWriter.GetOutputFile()
 }

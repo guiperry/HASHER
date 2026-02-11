@@ -36,7 +36,7 @@ var (
 )
 
 type seedWriterInterface interface {
-	AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error
+	AddSeedWrite(slots [12]uint32, bestSeed []byte) error
 	WriteBack() error
 	GetOutputFile() string
 }
@@ -635,14 +635,14 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 	}
 
 	// Immediately write best seed back to JSON output
-	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Source: %s, Chunk: %d, Window: %d", 
-		record.TargetToken, record.SourceFile, record.ChunkID, record.WindowStart)
+	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s", 
+		record.TargetToken, record.FeatureVector[0], record.SourceFile)
 	
-	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.ChunkID, record.WindowStart, seed.Seed); err != nil {
+	if err := to.seedWriter.AddSeedWrite(record.FeatureVector, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {
 		if err := to.seedWriter.WriteBack(); err != nil {
-			to.logger.Error("Failed to write seed back to JSON: %v", err)
+			to.logger.Error("Failed to write seed back to storage: %v", err)
 		} else {
 			to.logger.Info("Wrote best seed for token %d to %s", record.TargetToken, filepath.Base(to.seedWriter.GetOutputFile()))
 		}
