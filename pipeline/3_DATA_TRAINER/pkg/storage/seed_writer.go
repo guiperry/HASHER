@@ -49,6 +49,7 @@ func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowS
 	}
 
 	key := sw.generateKey(sourceFile, chunkID, windowStart)
+	fmt.Printf("[DEBUG] Queuing seed for key: %s\n", key)
 	sw.pendingWrites[key] = bestSeed
 	return nil
 }
@@ -60,6 +61,11 @@ func (sw *JSONSeedWriter) WriteBack() error {
 
 	if len(sw.pendingWrites) == 0 {
 		return nil
+	}
+
+	fmt.Printf("[DEBUG] SeedWriter: Writing back %d pending seeds\n", len(sw.pendingWrites))
+	for k := range sw.pendingWrites {
+		fmt.Printf("[DEBUG] Pending key: %s\n", k)
 	}
 
 	// 1. Read existing file (ingestion source)
@@ -97,6 +103,7 @@ func (sw *JSONSeedWriter) WriteBack() error {
 		key := sw.generateKey(sourceFile, int32(chunkIDRaw), int32(windowStartRaw))
 		
 		if seed, ok := sw.pendingWrites[key]; ok {
+			fmt.Printf("[DEBUG] MATCH FOUND for key: %s\n", key)
 			// Update the record - use original case if present, otherwise snake_case
 			if _, exists := record["best_seed"]; exists {
 				record["best_seed"] = seed
@@ -131,33 +138,43 @@ func (sw *JSONSeedWriter) GetOutputFile() string {
 	return sw.outputFile
 }
 
-// DualSeedWriter is now a wrapper around JSONSeedWriter as Parquet is deprecated
+// DualSeedWriter writes to both JSON and Arrow
 type DualSeedWriter struct {
-	jsonWriter *JSONSeedWriter
+	jsonWriter  *JSONSeedWriter
+	arrowWriter *ArrowSeedWriter
 }
 
-// NewDualSeedWriter creates a new DualSeedWriter that primary targets JSON
+// NewDualSeedWriter creates a new DualSeedWriter that targets both JSON and Arrow
 func NewDualSeedWriter(dataPath string) *DualSeedWriter {
 	framesDir := filepath.Join(dataPath, "frames")
 	jsonSource := filepath.Join(framesDir, "training_frames.json")
 	jsonOutput := filepath.Join(framesDir, "training_frames_with_seeds.json")
+	arrowSource := filepath.Join(framesDir, "training_frames.arrow")
+	arrowOutput := filepath.Join(framesDir, "training_frames_with_seeds.arrow")
 
 	return &DualSeedWriter{
-		jsonWriter: NewJSONSeedWriter(jsonSource, jsonOutput),
+		jsonWriter:  NewJSONSeedWriter(jsonSource, jsonOutput),
+		arrowWriter: NewArrowSeedWriter(arrowSource, arrowOutput),
 	}
 }
 
-// AddSeedWrite redirects to JSON writer with full metadata
+// AddSeedWrite redirects to both writers
 func (dsw *DualSeedWriter) AddSeedWrite(sourceFile string, chunkID int32, windowStart int32, bestSeed []byte) error {
-	return dsw.jsonWriter.AddSeedWrite(sourceFile, chunkID, windowStart, bestSeed)
+	if err := dsw.jsonWriter.AddSeedWrite(sourceFile, chunkID, windowStart, bestSeed); err != nil {
+		return err
+	}
+	return dsw.arrowWriter.AddSeedWrite(sourceFile, chunkID, windowStart, bestSeed)
 }
 
-// WriteBack commits pending writes to the JSON output
+// WriteBack commits pending writes to both outputs
 func (dsw *DualSeedWriter) WriteBack() error {
-	return dsw.jsonWriter.WriteBack()
+	if err := dsw.jsonWriter.WriteBack(); err != nil {
+		return err
+	}
+	return dsw.arrowWriter.WriteBack()
 }
 
-// GetOutputFile returns the primary output file path
+// GetOutputFile returns the primary output file path (JSON)
 func (dsw *DualSeedWriter) GetOutputFile() string {
 	return dsw.jsonWriter.GetOutputFile()
 }

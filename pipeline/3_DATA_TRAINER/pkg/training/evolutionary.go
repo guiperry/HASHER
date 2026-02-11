@@ -29,6 +29,7 @@ type TrainingRecord struct {
 	FeatureVector [12]uint32 `json:"feature_vector"`
 	TargetToken   int32      `json:"target_token"`
 	ContextHash   uint32     `json:"context_hash"`
+	BestSeed      []byte     `json:"best_seed,omitempty"`
 }
 
 // BitcoinHeader constants for the "Camouflage" strategy
@@ -295,6 +296,7 @@ type EvolutionaryHarness struct {
 	DifficultyMask uint32 // For partial difficulty validation (e.g., 0xFFFF0000 for 16-bit match)
 	StaticMidstate bool   // Freeze jitter for first N generations
 	Generation     int    // Track current generation for midstate logic
+	Epoch          int    // Track current epoch for DDS
 }
 
 func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
@@ -309,10 +311,33 @@ func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
 			FormatWeight:    0.1,
 		},
 		rand:           mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
-		DifficultyMask: 0xFFFF0000, // Require 16-bit prefix match by default
+		DifficultyMask: 0xFFF00000, // Start with 12 bits (Epoch 1)
 		StaticMidstate: true,
 		Generation:     0,
+		Epoch:          1,
 	}
+}
+
+// UpdateDifficulty scales the difficulty mask based on the current epoch
+// Epoch 1: 12 bits (0xFFF00000) -> Epoch 10: 24 bits (0xFFFFFF00)
+func (eh *EvolutionaryHarness) UpdateDifficulty(epoch int) {
+	eh.Epoch = epoch
+
+	// Base bits at epoch 1 = 12
+	// Target bits at epoch 10 = 24
+	// Increment: ~1.33 bits per epoch
+
+	targetBits := 12 + int(float64(epoch-1)*1.33)
+	if targetBits > 32 {
+		targetBits = 32
+	}
+	if targetBits < 12 {
+		targetBits = 12
+	}
+
+	// Create mask
+	eh.DifficultyMask = uint32(0xFFFFFFFF) << (32 - targetBits)
+	fmt.Printf("[DDS] Epoch %d: Difficulty set to %d bits (Mask: 0x%08X)\n", epoch, targetBits, eh.DifficultyMask)
 }
 
 // SetDifficultyMask sets the difficulty mask for partial validation
@@ -768,10 +793,11 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 		}
 		copy(result.Seed, seed)
 
-		// Perform Double-SHA256 using Bitcoin header method
-		finalHash, err := sim.SimulateBitcoinHeader(header)
+		// Perform 21-pass temporal loop using RecursiveMine (Pathfinder logic)
+		// This invokes the Jitter RPC for associative nudging
+		finalHash, err := sim.RecursiveMine(header, 21)
 		if err != nil {
-			eh.logError("Bitcoin header simulation failed for seed %d: %v", seedIDs[i], err)
+			eh.logError("RecursiveMine failed for seed %d: %v", seedIDs[i], err)
 			result.Reward = 0.0
 			results[i] = *result
 			continue

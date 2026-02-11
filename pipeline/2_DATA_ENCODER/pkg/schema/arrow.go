@@ -409,10 +409,14 @@ func arrowBatchToTrainingFrames(batch array.Record) ([]TrainingFrame, error) {
 	asicSlot10Col := batch.Column(15).(*array.Int32)
 	asicSlot11Col := batch.Column(16).(*array.Int32)
 	targetTokenIDCol := batch.Column(17).(*array.Int32)
-	bestSeedCol := batch.Column(18).(*array.String)
+	bestSeedCol := batch.Column(18).(*array.Binary)
 
 	// Convert each row
 	for i := 0; i < int(batch.NumRows()); i++ {
+		var seed []byte
+		if !bestSeedCol.IsNull(i) {
+			seed = bestSeedCol.Value(i)
+		}
 		frames = append(frames, TrainingFrame{
 			SourceFile:     sourceFileCol.Value(i),
 			ChunkID:        chunkIDCol.Value(i),
@@ -432,7 +436,7 @@ func arrowBatchToTrainingFrames(batch array.Record) ([]TrainingFrame, error) {
 			AsicSlots10:    asicSlot10Col.Value(i),
 			AsicSlots11:    asicSlot11Col.Value(i),
 			TargetTokenID:  targetTokenIDCol.Value(i),
-			BestSeed:       bestSeedCol.Value(i),
+			BestSeed:       seed,
 		})
 	}
 

@@ -235,7 +235,7 @@ func TestComponentIntegration(t *testing.T) {
 			WindowEnd:     int32(i + 1),
 			ContextLength: int32(i),
 			TargetTokenID: int32(tokenID),
-			BestSeed:      "",
+			BestSeed:      nil,
 		}
 		frame.SetAsicSlots(slots)
 
@@ -280,7 +280,7 @@ func TestSlidingWindowIntegration(t *testing.T) {
 			WindowEnd:     int32(i),
 			ContextLength: int32(i - start),
 			TargetTokenID: int32(tokens[i]),
-			BestSeed:      "",
+			BestSeed:      nil,
 		}
 		frame.SetAsicSlots(slots)
 

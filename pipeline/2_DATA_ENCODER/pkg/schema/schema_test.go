@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -108,7 +109,7 @@ func TestTrainingFrameStructure(t *testing.T) {
 		WindowEnd:     10,
 		ContextLength: 10,
 		TargetTokenID: 42,
-		BestSeed:      "",
+		BestSeed:      nil,
 	}
 	frame.SetAsicSlots([12]uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
 
@@ -164,7 +165,7 @@ func TestTrainingFrameWithSeed(t *testing.T) {
 		WindowEnd:     128,
 		ContextLength: 78,
 		TargetTokenID: 12345,
-		BestSeed:      string(seed),
+		BestSeed:      seed,
 	}
 	frame.SetAsicSlots([12]uint32{})
 
@@ -216,7 +217,7 @@ func TestTrainingFrameRoundTrip(t *testing.T) {
 		WindowEnd:     64,
 		ContextLength: 64,
 		TargetTokenID: 45678,
-		BestSeed:      "test_seed_data",
+		BestSeed:      []byte("test_seed_data"),
 	}
 	frame.SetAsicSlots([12]uint32{
 		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
@@ -251,7 +252,7 @@ func TestTrainingFrameRoundTrip(t *testing.T) {
 	}
 
 	// Verify seed
-	if frame.BestSeed != "test_seed_data" {
+	if !bytes.Equal(frame.BestSeed, []byte("test_seed_data")) {
 		t.Errorf("BestSeed mismatch: got %s, want %s", frame.BestSeed, "test_seed_data")
 	}
 

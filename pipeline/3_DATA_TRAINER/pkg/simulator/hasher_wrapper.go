@@ -3,11 +3,80 @@ package simulator
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"sync"
 
 	"hasher/pkg/hashing/core"
 	"hasher/pkg/hashing/methods/software"
 )
+
+// ... (existing struct)
+
+// RecursiveMine performs the 21-pass temporal loop with associative jitter
+func (h *HasherWrapper) RecursiveMine(header []byte, passes int) (uint32, error) {
+	if !h.isRunning {
+		return 0, fmt.Errorf("simulator is not running")
+	}
+
+	if len(header) != 80 {
+		return 0, fmt.Errorf("invalid header length")
+	}
+
+	// Working copy of header
+	currentHeader := make([]byte, 80)
+	copy(currentHeader, header)
+
+	var lastHash uint32
+
+	// Connect to Jitter RPC Server
+	conn, err := net.Dial("unix", "/tmp/jitter.sock")
+	if err != nil {
+		// Fallback to non-jitter mining if server not available
+		return h.SimulateBitcoinHeader(header)
+	}
+	defer conn.Close()
+
+	for i := 0; i < passes; i++ {
+		// 1. Pass i: Hash current state
+		hash, err := h.SimulateBitcoinHeader(currentHeader)
+		if err != nil {
+			return 0, err
+		}
+		lastHash = hash
+
+		// 2. RPC: Get jitter from Host (Dimension Shift: Search 0, Retrieve 1)
+		jitter, err := h.getJitterRPC(conn, hash)
+		if err != nil {
+			continue // Skip jitter if RPC fails
+		}
+
+		// 3. Inject: XOR jitter into Merkle Root slots (e.g. slot 8 = bytes 36-39)
+		// We rotate through the 4 Merkle Root slots
+		slotIdx := i % 4
+		offset := 36 + (slotIdx * 4)
+		
+		existing := binary.BigEndian.Uint32(currentHeader[offset : offset+4])
+		binary.BigEndian.PutUint32(currentHeader[offset:offset+4], existing^jitter)
+	}
+
+	return lastHash, nil
+}
+
+func (h *HasherWrapper) getJitterRPC(conn net.Conn, hash uint32) (uint32, error) {
+	// Send 4-byte hash
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, hash)
+	if _, err := conn.Write(buf); err != nil {
+		return 0, err
+	}
+
+	// Read 4-byte jitter
+	if _, err := conn.Read(buf); err != nil {
+		return 0, err
+	}
+
+	return binary.LittleEndian.Uint32(buf), nil
+}
 
 // HasherWrapper implements the HashSimulator interface using hasher's HashMethod
 // This replaces the internal vhasher simulator with the production-grade hasher module

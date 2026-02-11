@@ -346,6 +346,19 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	}
 	to.flashManager = flashManager
 
+	// Populate FlashManager Knowledge Base
+	to.logger.Info("Populating FlashManager Knowledge Base...")
+	to.flashManager.SetKnowledgeBase(to.trainingData)
+
+	// Start Jitter RPC Server
+	to.logger.Info("Starting Jitter RPC Server on /tmp/jitter.sock...")
+	jitterServer := simulator.NewJitterServer("/tmp/jitter.sock", to.flashManager.GetAssociativeJitter)
+	if err := jitterServer.Start(); err != nil {
+		to.logger.Warn("Failed to start Jitter Server: %v", err)
+	} else {
+		to.logger.Info("Jitter Server active")
+	}
+
 	return nil
 }
 
@@ -372,6 +385,7 @@ func (to *TrainingOrchestrator) runSyntheticTraining(ctx context.Context, maxEpo
 		}
 
 		to.logger.Info("Starting epoch %d/%d", epoch+1, maxEpochs)
+		to.harness.UpdateDifficulty(epoch + 1)
 
 		if err := to.runEpoch(ctx, epoch, tokenMap); err != nil {
 			to.logger.Error("Epoch %d failed: %v", epoch+1, err)
@@ -399,6 +413,7 @@ func (to *TrainingOrchestrator) runTrainingWithData(ctx context.Context, maxEpoc
 		}
 
 		to.logger.Info("Starting epoch %d/%d with %d records", epoch+1, maxEpochs, len(records))
+		to.harness.UpdateDifficulty(epoch + 1)
 
 		// Process records in batches
 		batchSize := populationSize
@@ -620,6 +635,9 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 	}
 
 	// Immediately write best seed back to JSON output
+	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Source: %s, Chunk: %d, Window: %d", 
+		record.TargetToken, record.SourceFile, record.ChunkID, record.WindowStart)
+	
 	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.ChunkID, record.WindowStart, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {

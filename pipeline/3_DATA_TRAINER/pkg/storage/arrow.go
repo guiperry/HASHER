@@ -80,7 +80,7 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 	sourceFileCol := batch.Column(0).(*array.String)
 	chunkIDCol := batch.Column(1).(*array.Int32)
 	windowStartCol := batch.Column(2).(*array.Int32)
-	
+
 	asicSlot0Col := batch.Column(5).(*array.Int32)
 	asicSlot1Col := batch.Column(6).(*array.Int32)
 	asicSlot2Col := batch.Column(7).(*array.Int32)
@@ -94,7 +94,7 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 	asicSlot10Col := batch.Column(15).(*array.Int32)
 	asicSlot11Col := batch.Column(16).(*array.Int32)
 	targetTokenCol := batch.Column(17).(*array.Int32)
-	
+
 	var bestSeedCol array.Interface
 	if batch.NumCols() > 18 {
 		bestSeedCol = batch.Column(18)
@@ -139,6 +139,17 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 		targetToken := targetTokenCol.Value(i)
 		contextHash := uint32(chunkIDCol.Value(i)) // Using ChunkID as context identifier
 
+		// Read best seed if present
+		var bestSeed []byte
+		if bestSeedCol != nil && !bestSeedCol.IsNull(i) {
+			switch col := bestSeedCol.(type) {
+			case *array.Binary:
+				bestSeed = col.Value(i)
+			case *array.String:
+				bestSeed = []byte(col.Value(i))
+			}
+		}
+
 		records = append(records, &training.TrainingRecord{
 			SourceFile:    sourceFileCol.Value(i),
 			ChunkID:       chunkIDCol.Value(i),
@@ -147,6 +158,7 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 			FeatureVector: featureVector,
 			TargetToken:   targetToken,
 			ContextHash:   contextHash,
+			BestSeed:      bestSeed,
 		})
 	}
 
@@ -187,16 +199,16 @@ func trainingRecordsToArrowBatch(records []*training.TrainingRecord, mem memory.
 	// Create builders
 	sourceFileBuilder := array.NewStringBuilder(mem)
 	defer sourceFileBuilder.Release()
-	
+
 	chunkIDBuilder := array.NewInt32Builder(mem)
 	defer chunkIDBuilder.Release()
-	
+
 	windowStartBuilder := array.NewInt32Builder(mem)
 	defer windowStartBuilder.Release()
-	
+
 	windowEndBuilder := array.NewInt32Builder(mem)
 	defer windowEndBuilder.Release()
-	
+
 	contextLengthBuilder := array.NewInt32Builder(mem)
 	defer contextLengthBuilder.Release()
 
@@ -217,15 +229,19 @@ func trainingRecordsToArrowBatch(records []*training.TrainingRecord, mem memory.
 		sourceFileBuilder.Append(record.SourceFile)
 		chunkIDBuilder.Append(record.ChunkID)
 		windowStartBuilder.Append(record.WindowStart)
-		windowEndBuilder.Append(0) // Default
+		windowEndBuilder.Append(0)     // Default
 		contextLengthBuilder.Append(0) // Default
-		
+
 		for i := 0; i < 12; i++ {
 			asicBuilders[i].Append(int32(record.FeatureVector[i]))
 		}
 
 		targetTokenBuilder.Append(record.TargetToken)
-		bestSeedBuilder.AppendNull()
+		if record.BestSeed != nil && len(record.BestSeed) > 0 {
+			bestSeedBuilder.Append(record.BestSeed)
+		} else {
+			bestSeedBuilder.AppendNull()
+		}
 	}
 
 	// Build final arrays

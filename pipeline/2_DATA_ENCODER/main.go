@@ -789,7 +789,7 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 				WindowEnd:     int32(window.EndPos),
 				ContextLength: int32(len(window.ContextTokens)),
 				TargetTokenID: int32(window.TargetToken),
-				BestSeed:      "",
+				BestSeed:      nil,
 			}
 			frame.SetAsicSlots(asicSlots)
 

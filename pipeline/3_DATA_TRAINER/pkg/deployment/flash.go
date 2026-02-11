@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lab/hasher/data-trainer/pkg/storage"
+	"github.com/lab/hasher/data-trainer/pkg/training"
 )
 
 type FlashConfig struct {
@@ -63,11 +64,64 @@ type DeploymentResult struct {
 }
 
 type FlashManager struct {
-	storage   *storage.CSVStorage
-	config    *FlashConfig
-	mutex     sync.RWMutex
-	stats     *FlashStats
-	isRunning bool
+	storage       *storage.CSVStorage
+	config        *FlashConfig
+	mutex         sync.RWMutex
+	stats         *FlashStats
+	isRunning     bool
+	knowledgeBase []training.TrainingRecord
+}
+
+// ... (existing NewFlashManager)
+
+func (fm *FlashManager) SetKnowledgeBase(records []*training.TrainingRecord) {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+
+	fm.knowledgeBase = make([]training.TrainingRecord, len(records))
+	for i, r := range records {
+		fm.knowledgeBase[i] = *r
+	}
+	fmt.Printf("[FLASH] Knowledge Base loaded with %d records\n", len(fm.knowledgeBase))
+}
+
+// GetAssociativeJitter implements the "Search Slot 0, Retrieve Slot 1" logic
+func (fm *FlashManager) GetAssociativeJitter(currentHash uint32) uint32 {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
+
+	if len(fm.knowledgeBase) == 0 {
+		return currentHash ^ 0xDEADBEEF // Fallback
+	}
+
+	// 1. Search for nearest neighbor based on Slot 0
+	// We treat currentHash as a coordinate in the Slot 0 space
+	var bestIdx int
+	minDiff := ^uint32(0) // Max uint32
+
+	for i, record := range fm.knowledgeBase {
+		// Calculate distance between currentHash and Slot 0
+		slot0 := record.FeatureVector[0]
+		// Or arithmetic distance? "Numerically closest" implies arithmetic.
+		// Let's use arithmetic distance for "numerically closest" as per spec.
+
+		var d uint32
+		if currentHash > slot0 {
+			d = currentHash - slot0
+		} else {
+			d = slot0 - currentHash
+		}
+
+		if d < minDiff {
+			minDiff = d
+			bestIdx = i
+		}
+	}
+
+	// 2. Retrieve Slot 1 (Secondary Semantic Feature)
+	jitter := fm.knowledgeBase[bestIdx].FeatureVector[1]
+
+	return jitter
 }
 
 type BPFDummyInterface struct {
