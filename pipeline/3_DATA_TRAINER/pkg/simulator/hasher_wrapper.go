@@ -10,74 +10,6 @@ import (
 	"hasher/pkg/hashing/methods/software"
 )
 
-// ... (existing struct)
-
-// RecursiveMine performs the 21-pass temporal loop with associative jitter
-func (h *HasherWrapper) RecursiveMine(header []byte, passes int) (uint32, error) {
-	if !h.isRunning {
-		return 0, fmt.Errorf("simulator is not running")
-	}
-
-	if len(header) != 80 {
-		return 0, fmt.Errorf("invalid header length")
-	}
-
-	// Working copy of header
-	currentHeader := make([]byte, 80)
-	copy(currentHeader, header)
-
-	var lastHash uint32
-
-	// Connect to Jitter RPC Server
-	conn, err := net.Dial("unix", "/tmp/jitter.sock")
-	if err != nil {
-		// Fallback to non-jitter mining if server not available
-		return h.SimulateBitcoinHeader(header)
-	}
-	defer conn.Close()
-
-	for i := 0; i < passes; i++ {
-		// 1. Pass i: Hash current state
-		hash, err := h.SimulateBitcoinHeader(currentHeader)
-		if err != nil {
-			return 0, err
-		}
-		lastHash = hash
-
-		// 2. RPC: Get jitter from Host (Dimension Shift: Search 0, Retrieve 1)
-		jitter, err := h.getJitterRPC(conn, hash)
-		if err != nil {
-			continue // Skip jitter if RPC fails
-		}
-
-		// 3. Inject: XOR jitter into Merkle Root slots (e.g. slot 8 = bytes 36-39)
-		// We rotate through the 4 Merkle Root slots
-		slotIdx := i % 4
-		offset := 36 + (slotIdx * 4)
-		
-		existing := binary.BigEndian.Uint32(currentHeader[offset : offset+4])
-		binary.BigEndian.PutUint32(currentHeader[offset:offset+4], existing^jitter)
-	}
-
-	return lastHash, nil
-}
-
-func (h *HasherWrapper) getJitterRPC(conn net.Conn, hash uint32) (uint32, error) {
-	// Send 4-byte hash
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, hash)
-	if _, err := conn.Write(buf); err != nil {
-		return 0, err
-	}
-
-	// Read 4-byte jitter
-	if _, err := conn.Read(buf); err != nil {
-		return 0, err
-	}
-
-	return binary.LittleEndian.Uint32(buf), nil
-}
-
 // HasherWrapper implements the HashSimulator interface using hasher's HashMethod
 // This replaces the internal vhasher simulator with the production-grade hasher module
 type HasherWrapper struct {
@@ -204,50 +136,107 @@ func (h *HasherWrapper) SimulateHash(seed []byte, pass int) (uint32, error) {
 	return result, nil
 }
 
-// SimulateBitcoinHeader performs Double-SHA256 on 80-byte Bitcoin header
-// Uses HashMethod.MineHeader for hardware acceleration when available
-func (h *HasherWrapper) SimulateBitcoinHeader(header []byte) (uint32, error) {
+// SimulateBitcoinHeaderFull performs Double-SHA256 on 80-byte Bitcoin header and returns full 32 bytes
+func (h *HasherWrapper) SimulateBitcoinHeaderFull(header []byte) ([]byte, error) {
 	if !h.isRunning {
-		return 0, fmt.Errorf("simulator is not running")
+		return nil, fmt.Errorf("simulator is not running")
 	}
 
 	if h.hashMethod == nil {
-		return 0, fmt.Errorf("hash method not initialized")
+		return nil, fmt.Errorf("hash method not initialized")
 	}
 
 	if len(header) != 80 {
-		return 0, fmt.Errorf("invalid Bitcoin header length: expected 80 bytes, got %d", len(header))
+		return nil, fmt.Errorf("invalid Bitcoin header length: expected 80 bytes, got %d", len(header))
 	}
 
-	// Create cache key
-	cacheKey := fmt.Sprintf("btc_%x", header[:16])
-
-	// Check cache
-	h.cacheMutex.RLock()
-	if cached, exists := h.cache[cacheKey]; exists {
-		h.cacheMutex.RUnlock()
-		return cached, nil
-	}
-	h.cacheMutex.RUnlock()
-
-	// Use MineHeader for Bitcoin-style mining
-	// This will use ASIC hardware if available, otherwise software fallback
-	nonceStart := binary.LittleEndian.Uint32(header[76:80])
-	nonceEnd := nonceStart + 0xFFFFFFFF
-
-	result, err := h.hashMethod.MineHeader(header, nonceStart, nonceEnd)
+	// Double SHA-256 of the header
+	hash1, err := h.hashMethod.ComputeHash(header)
 	if err != nil {
-		return 0, fmt.Errorf("bitcoin header mining failed: %w", err)
+		return nil, err
+	}
+	
+	hash2, err := h.hashMethod.ComputeHash(hash1[:])
+	if err != nil {
+		return nil, err
 	}
 
-	// Cache result
-	if len(h.cache) < h.config.CacheSize {
-		h.cacheMutex.Lock()
-		h.cache[cacheKey] = result
-		h.cacheMutex.Unlock()
+	return hash2[:], nil
+}
+
+// SimulateBitcoinHeader returns first 4 bytes of Double-SHA256 as uint32
+func (h *HasherWrapper) SimulateBitcoinHeader(header []byte) (uint32, error) {
+	hashFull, err := h.SimulateBitcoinHeaderFull(header)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(hashFull[:4]), nil
+}
+
+// RecursiveMine performs the 21-pass temporal loop with associative jitter
+// Returns the full 32-byte double-SHA256 hash of the final pass
+func (h *HasherWrapper) RecursiveMine(header []byte, passes int) ([]byte, error) {
+	if !h.isRunning {
+		return nil, fmt.Errorf("simulator is not running")
 	}
 
-	return result, nil
+	// Working copy of header
+	currentHeader := make([]byte, 80)
+	copy(currentHeader, header)
+
+	var lastHashFull []byte
+
+	// Connect to Jitter RPC Server
+	conn, err := net.Dial("unix", "/tmp/jitter.sock")
+	if err != nil {
+		// Fallback to non-jitter mining if server not available
+		return h.SimulateBitcoinHeaderFull(header)
+	}
+	defer conn.Close()
+
+	for i := 0; i < passes; i++ {
+		// 1. Pass i: Hash current state
+		hashFull, err := h.SimulateBitcoinHeaderFull(currentHeader)
+		if err != nil {
+			return nil, err
+		}
+		lastHashFull = hashFull
+
+		// Extract uint32 for Jitter RPC
+		hash32 := binary.LittleEndian.Uint32(hashFull[:4])
+
+		// 2. RPC: Get jitter from Host (Dimension Shift: Search 0, Retrieve 1)
+		jitter, err := h.getJitterRPC(conn, hash32)
+		if err != nil {
+			continue // Skip jitter if RPC fails
+		}
+
+		// 3. Inject: XOR jitter into Merkle Root slots (e.g. slot 8 = bytes 36-39)
+		// We rotate through the 4 Merkle Root slots (bytes 36-51)
+		slotIdx := i % 4
+		offset := 36 + (slotIdx * 4)
+		
+		existing := binary.BigEndian.Uint32(currentHeader[offset : offset+4])
+		binary.BigEndian.PutUint32(currentHeader[offset:offset+4], existing^jitter)
+	}
+
+	return lastHashFull, nil
+}
+
+func (h *HasherWrapper) getJitterRPC(conn net.Conn, hash uint32) (uint32, error) {
+	// Send 4-byte hash
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, hash)
+	if _, err := conn.Write(buf); err != nil {
+		return 0, err
+	}
+
+	// Read 4-byte jitter
+	if _, err := conn.Read(buf); err != nil {
+		return 0, err
+	}
+
+	return binary.LittleEndian.Uint32(buf), nil
 }
 
 // ValidateSeed checks if seed produces target token in any pass
@@ -256,7 +245,7 @@ func (h *HasherWrapper) ValidateSeed(seed []byte, targetToken int32) (bool, erro
 		return false, fmt.Errorf("simulator is not running")
 	}
 
-	// Check multiple passes (as in original vhasher)
+	// Check multiple passes
 	for pass := 0; pass < 21; pass++ {
 		nonce, err := h.SimulateHash(seed, pass)
 		if err != nil {
@@ -268,35 +257,19 @@ func (h *HasherWrapper) ValidateSeed(seed []byte, targetToken int32) (bool, erro
 		}
 	}
 
-	// Check final pass specifically
-	finalNonce, err := h.SimulateHash(seed, 20)
-	if err != nil {
-		return false, err
-	}
-
-	return finalNonce == uint32(targetToken), nil
+	return false, nil
 }
 
 // ProcessHeadersBatch processes multiple Bitcoin headers in parallel
-// Optimized for batch processing using HashMethod.ComputeBatch
 func (h *HasherWrapper) ProcessHeadersBatch(headers [][]byte, targetTokenID uint32) ([]uint32, error) {
 	if !h.isRunning {
 		return nil, fmt.Errorf("simulator is not running")
 	}
 
-	if h.hashMethod == nil {
-		return nil, fmt.Errorf("hash method not initialized")
-	}
-
 	results := make([]uint32, len(headers))
-
-	// Use batch processing if available
-	// Note: HashMethod.ComputeBatch expects data to hash, not headers to mine
-	// For mining, we process individually but could parallelize
 	for i, header := range headers {
 		result, err := h.SimulateBitcoinHeader(header)
 		if err != nil {
-			// Continue processing other headers
 			continue
 		}
 		results[i] = result

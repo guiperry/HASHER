@@ -36,7 +36,7 @@ var (
 )
 
 type seedWriterInterface interface {
-	AddSeedWrite(slots [12]uint32, bestSeed []byte) error
+	AddSeedWrite(slots [12]uint32, targetTokenID int32, bestSeed []byte) error
 	WriteBack() error
 	GetOutputFile() string
 }
@@ -266,7 +266,11 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	if to.sequential {
 		to.logger.Info("Sequential processing enabled (cleaner logs)")
 	}
-	trainingDataPath := filepath.Join(to.dataPath, "frames", "training_frames.json")
+	trainingDataPath := filepath.Join(to.dataPath, "frames", "training_frames_with_seeds.json")
+	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
+		trainingDataPath = filepath.Join(to.dataPath, "frames", "training_frames.json")
+	}
+	
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
 	}
@@ -634,17 +638,17 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 		return fmt.Errorf("failed to save checkpoint: %w", err)
 	}
 
-	// Immediately write best seed back to JSON output
+	// Immediately write best seed back to storage
 	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s", 
 		record.TargetToken, record.FeatureVector[0], record.SourceFile)
 	
-	if err := to.seedWriter.AddSeedWrite(record.FeatureVector, seed.Seed); err != nil {
+	if err := to.seedWriter.AddSeedWrite(record.FeatureVector, record.TargetToken, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {
 		if err := to.seedWriter.WriteBack(); err != nil {
 			to.logger.Error("Failed to write seed back to storage: %v", err)
 		} else {
-			to.logger.Info("Wrote best seed for token %d to %s", record.TargetToken, filepath.Base(to.seedWriter.GetOutputFile()))
+			to.logger.Info("Wrote best seed for token %d to storage", record.TargetToken)
 		}
 	}
 

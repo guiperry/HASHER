@@ -803,8 +803,12 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 			continue
 		}
 
-		// The golden nonce is first 4 bytes of final Double-SHA256
-		goldenNonce := finalHash
+		// The user wants the Double-SHA256 hashed result to be used as the final Seed
+		result.Seed = make([]byte, len(finalHash))
+		copy(result.Seed, finalHash)
+
+		// The golden nonce is first 4 bytes of final Double-SHA256 for bit-matching
+		goldenNonce := binary.LittleEndian.Uint32(finalHash[:4])
 
 		// Store hash output for bit-matching
 		result.HashOutput = goldenNonce
