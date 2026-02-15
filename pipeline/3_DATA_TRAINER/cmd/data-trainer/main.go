@@ -520,14 +520,14 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 			bestSeed := eliteSeeds[0]
 			// Winning condition: passes difficulty mask OR has very high advantage
 			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(record.TargetToken)) {
-				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", record.TargetToken, gen)
+				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (%d-bit prefix match)", record.TargetToken, gen, *difficultyBits)
 				return to.saveWinningSeed(record, bestSeed, gen)
 			}
 			// Also accept if advantage is very high AND meets a minimum quality threshold
 			if bestSeed.Advantage > 2.0 {
 				diff := bestSeed.HashOutput ^ uint32(record.TargetToken)
 				matchingBits := bits.LeadingZeros32(diff)
-				if matchingBits >= 16 { // Require at least 16 bits of similarity for a high-advantage win
+				if matchingBits >= *difficultyBits { // Require at least difficulty-bits of similarity for a high-advantage win
 					to.logger.Info("[WIN] Token %d: Found winning seed in gen %d (high advantage=%.2f, %d bits)", record.TargetToken, gen, bestSeed.Advantage, matchingBits)
 					return to.saveWinningSeed(record, bestSeed, gen)
 				}
@@ -548,7 +548,7 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 		}
 	}
 
-	to.logger.Warn("Token %d: No 16-bit match after %d generations (try increasing -generations)", record.TargetToken, *maxGenerations)
+	to.logger.Warn("Token %d: No %d-bit match after %d generations (try increasing -generations)", record.TargetToken, *difficultyBits, *maxGenerations)
 	return nil
 }
 
@@ -592,7 +592,7 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 			bestSeed := eliteSeeds[0]
 			// Winning condition: passes difficulty mask OR has very high advantage
 			if to.harness.IsWinningSeed(bestSeed.HashOutput, uint32(targetToken)) {
-				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (16-bit prefix match)", targetToken, gen)
+				to.logger.Info("[WIN] Token %d: Found winning seed in generation %d (%d-bit prefix match)", targetToken, gen, *difficultyBits)
 				return to.saveWinningSeed(record, bestSeed, gen)
 			}
 			// Also accept if advantage is very high (converged solution)
@@ -616,7 +616,7 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 		}
 	}
 
-	to.logger.Warn("Token %d: No 16-bit match after %d generations (try increasing -generations)", targetToken, *maxGenerations)
+	to.logger.Warn("Token %d: No %d-bit match after %d generations (try increasing -generations)", targetToken, *difficultyBits, *maxGenerations)
 	return nil
 }
 
