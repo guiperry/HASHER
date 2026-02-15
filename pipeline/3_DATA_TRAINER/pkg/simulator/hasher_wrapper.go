@@ -3,9 +3,12 @@ package simulator
 import (
 	"encoding/binary"
 	"fmt"
+	"os/exec"
+	"strings"
 	"sync"
 
 	"hasher/pkg/hashing/core"
+	"hasher/pkg/hashing/methods/cuda"
 	"hasher/pkg/hashing/methods/software"
 )
 
@@ -18,6 +21,7 @@ type HasherWrapper struct {
 	cacheMutex sync.RWMutex
 	isRunning  bool
 	mutex      sync.RWMutex
+	methodType string // "auto", "software", "cuda"
 }
 
 // NewHasherWrapper creates a new HashSimulator wrapper using hasher's HashMethod
@@ -41,20 +45,33 @@ func NewHasherWrapper(config *SimulatorConfig) *HasherWrapper {
 	}
 }
 
-// Initialize sets up the HashMethod (defaults to software if not specified)
+// Initialize sets up the HashMethod based on configuration
 func (h *HasherWrapper) Initialize(config *SimulatorConfig) error {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
 	if config != nil {
 		h.config = config
+		// Check if method type is specified in DeviceType
+		if strings.Contains(config.DeviceType, "software") {
+			h.methodType = "software"
+		} else if strings.Contains(config.DeviceType, "cuda") {
+			h.methodType = "cuda"
+		} else {
+			h.methodType = "auto"
+		}
 	}
 
-	// Default to software method if no specific method is configured
+	// Initialize hash method based on type
 	if h.hashMethod == nil {
-		h.hashMethod = software.NewSoftwareMethod()
+		var err error
+		h.hashMethod, err = h.createHashMethod()
+		if err != nil {
+			return fmt.Errorf("failed to create hash method: %w", err)
+		}
+
 		if err := h.hashMethod.Initialize(); err != nil {
-			return fmt.Errorf("failed to initialize software hash method: %w", err)
+			return fmt.Errorf("failed to initialize hash method: %w", err)
 		}
 	}
 
@@ -62,11 +79,55 @@ func (h *HasherWrapper) Initialize(config *SimulatorConfig) error {
 	return nil
 }
 
+// createHashMethod creates the appropriate hash method based on configuration
+func (h *HasherWrapper) createHashMethod() (core.HashMethod, error) {
+	switch h.methodType {
+	case "cuda":
+		// Directly create CUDA method
+		cudaMethod := cuda.NewCudaMethod()
+		if cudaMethod.IsAvailable() {
+			return cudaMethod, nil
+		}
+		// Fall back to software if CUDA not available
+		return software.NewSoftwareMethod(), nil
+
+	case "software":
+		return software.NewSoftwareMethod(), nil
+
+	case "auto":
+		// Auto-detect: try CUDA first, then software
+		if h.isCUDAAvailable() {
+			cudaMethod := cuda.NewCudaMethod()
+			if cudaMethod.IsAvailable() {
+				return cudaMethod, nil
+			}
+		}
+		return software.NewSoftwareMethod(), nil
+
+	default:
+		return software.NewSoftwareMethod(), nil
+	}
+}
+
+// isCUDAAvailable checks if CUDA is available on the system
+func (h *HasherWrapper) isCUDAAvailable() bool {
+	cmd := exec.Command("nvidia-smi")
+	err := cmd.Run()
+	return err == nil
+}
+
 // SetHashMethod allows injection of a specific HashMethod (e.g., ASIC, CUDA)
 func (h *HasherWrapper) SetHashMethod(method core.HashMethod) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	h.hashMethod = method
+}
+
+// SetMethodType sets the hash method type (auto, software, cuda)
+func (h *HasherWrapper) SetMethodType(methodType string) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.methodType = methodType
 }
 
 // Shutdown cleans up the HashMethod
@@ -150,12 +211,12 @@ func (h *HasherWrapper) SimulateBitcoinHeader(header []byte) (uint32, error) {
 	// Most HashMethods implement double-hash internally for MineHeader.
 	// But core.HashMethod doesn't have a direct "ComputeDoubleHash" exposed.
 	// It has ComputeHash.
-	
+
 	hash1, err := h.hashMethod.ComputeHash(header)
 	if err != nil {
 		return 0, err
 	}
-	
+
 	hash2, err := h.hashMethod.ComputeHash(hash1[:])
 	if err != nil {
 		return 0, err

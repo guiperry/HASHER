@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/lab/hasher/data-trainer/internal/config"
 	"github.com/lab/hasher/data-trainer/pkg/simulator"
 	"hasher/pkg/hashing/hardware"
 )
@@ -301,6 +302,28 @@ type EvolutionaryHarness struct {
 }
 
 func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
+	// Default difficulty mask uses centralized constant (12 bits = 0xFFF00000)
+	// This ensures consistency across the entire codebase
+	var defaultMask uint32
+	switch config.DefaultDifficultyBits {
+	case 8:
+		defaultMask = 0xFF000000
+	case 12:
+		defaultMask = 0xFFF00000
+	case 16:
+		defaultMask = 0xFFFF0000
+	case 20:
+		defaultMask = 0xFFFFF000
+	case 24:
+		defaultMask = 0xFFFFFF00
+	case 28:
+		defaultMask = 0xFFFFFFF0
+	case 32:
+		defaultMask = 0xFFFFFFFF
+	default:
+		defaultMask = 0xFFF00000 // Fallback to 12 bits
+	}
+
 	return &EvolutionaryHarness{
 		PopulationSize: populationSize,
 		EliteRatio:     0.25,
@@ -312,7 +335,7 @@ func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
 			FormatWeight:    0.1,
 		},
 		rand:           mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
-		DifficultyMask: 0xFFF00000, // Start with 12 bits (Epoch 1)
+		DifficultyMask: defaultMask, // Uses centralized DefaultDifficultyBits constant
 		StaticMidstate: true,
 		Generation:     0,
 		Epoch:          1,
@@ -320,24 +343,80 @@ func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
 }
 
 // UpdateDifficulty scales the difficulty mask based on the current epoch
-// Epoch 1: 12 bits (0xFFF00000) -> Epoch 10: 24 bits (0xFFFFFF00)
+// Starts at DefaultDifficultyBits and increases over epochs
 func (eh *EvolutionaryHarness) UpdateDifficulty(epoch int) {
 	eh.Epoch = epoch
 
-	// Base bits at epoch 1 = 12
+	// Base bits at epoch 1 = DefaultDifficultyBits (default: 12)
 	// Target bits at epoch 10 = 24
 	// Increment: ~1.33 bits per epoch
 
-	targetBits := 12 + int(float64(epoch-1)*1.33)
-	if targetBits > 32 {
-		targetBits = 32
+	targetBits := config.DefaultDifficultyBits + int(float64(epoch-1)*1.33)
+	if targetBits > config.MaxDifficultyBits {
+		targetBits = config.MaxDifficultyBits
 	}
-	if targetBits < 12 {
-		targetBits = 12
+	if targetBits < config.MinDifficultyBits {
+		targetBits = config.MinDifficultyBits
 	}
 
-	// Create mask
-	eh.DifficultyMask = uint32(0xFFFFFFFF) << (32 - targetBits)
+	// Create mask using lookup to avoid overflow issues
+	var mask uint32
+	switch targetBits {
+	case 8:
+		mask = 0xFF000000
+	case 9:
+		mask = 0xFF800000
+	case 10:
+		mask = 0xFFC00000
+	case 11:
+		mask = 0xFFE00000
+	case 12:
+		mask = 0xFFF00000
+	case 13:
+		mask = 0xFFF80000
+	case 14:
+		mask = 0xFFFC0000
+	case 15:
+		mask = 0xFFFE0000
+	case 16:
+		mask = 0xFFFF0000
+	case 17:
+		mask = 0xFFFF8000
+	case 18:
+		mask = 0xFFFFC000
+	case 19:
+		mask = 0xFFFFE000
+	case 20:
+		mask = 0xFFFFF000
+	case 21:
+		mask = 0xFFFFF800
+	case 22:
+		mask = 0xFFFFFC00
+	case 23:
+		mask = 0xFFFFFE00
+	case 24:
+		mask = 0xFFFFFF00
+	case 25:
+		mask = 0xFFFFFF80
+	case 26:
+		mask = 0xFFFFFFC0
+	case 27:
+		mask = 0xFFFFFFE0
+	case 28:
+		mask = 0xFFFFFFF0
+	case 29:
+		mask = 0xFFFFFFF8
+	case 30:
+		mask = 0xFFFFFFFC
+	case 31:
+		mask = 0xFFFFFFFE
+	case 32:
+		mask = 0xFFFFFFFF
+	default:
+		mask = 0xFFF00000 // Default to 12 bits
+	}
+
+	eh.DifficultyMask = mask
 	fmt.Printf("[DDS] Epoch %d: Difficulty set to %d bits (Mask: 0x%08X)\n", epoch, targetBits, eh.DifficultyMask)
 }
 

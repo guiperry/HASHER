@@ -1,5 +1,17 @@
 package config
 
+// DefaultDifficultyBits is the centralized default difficulty setting
+// This controls how many leading bits must match for a winning seed
+// Lower = faster training, Higher = more selective
+const DefaultDifficultyBits = 12
+
+// MinDifficultyBits and MaxDifficultyBits define valid ranges
+const (
+	MinDifficultyBits = 8
+	MaxDifficultyBits = 32
+)
+
+// Config is the main application configuration
 type Config struct {
 	Simulator  *SimulatorConfig  `json:"simulator"`
 	Storage    *StorageConfig    `json:"storage"`
@@ -30,6 +42,8 @@ type TrainingConfig struct {
 	MutationRate    float64 `json:"mutation_rate"`
 	TargetFitness   float64 `json:"target_fitness"`
 	ValidationSplit float64 `json:"validation_split"`
+	DifficultyBits  int     `json:"difficulty_bits"`   // Number of leading bits that must match
+	MinMatchingBits int     `json:"min_matching_bits"` // Minimum bits for high-advantage wins
 }
 
 type DeploymentConfig struct {

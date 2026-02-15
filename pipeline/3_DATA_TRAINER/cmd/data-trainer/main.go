@@ -31,9 +31,10 @@ var (
 	maxEpochs      = flag.Int("epochs", 10, "Maximum number of training epochs")
 	population     = flag.Int("population", 256, "Population size for evolution")
 	maxGenerations = flag.Int("generations", 200, "Maximum number of generations")
-	difficultyBits = flag.Int("difficulty-bits", 32, "Number of leading bits that must match (8-32)")
+	difficultyBits = flag.Int("difficulty-bits", config.DefaultDifficultyBits, fmt.Sprintf("Number of leading bits that must match (%d-%d)", config.MinDifficultyBits, config.MaxDifficultyBits))
 	verbose        = flag.Bool("verbose", false, "Enable verbose logging")
 	sequential     = flag.Bool("sequential", false, "Process tokens sequentially (cleaner logs)")
+	hashMethod     = flag.String("hash-method", "auto", "Hash method to use: auto, software, cuda")
 )
 
 type seedWriterInterface interface {
@@ -224,9 +225,9 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 		to.logger.Info("Configuration loaded from file")
 	}
 
-	to.logger.Info("Initializing simulator...")
+	to.logger.Info("Initializing simulator with hash-method=%s...", *hashMethod)
 	simConfig := &simulator.SimulatorConfig{
-		DeviceType:     "hasher",
+		DeviceType:     fmt.Sprintf("hasher_%s", *hashMethod),
 		MaxConcurrency: 100,
 		TargetHashRate: 500000000,
 		CacheSize:      10000,
@@ -238,6 +239,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	if err := sim.Initialize(simConfig); err != nil {
 		return fmt.Errorf("failed to initialize simulator: %w", err)
 	}
+	to.logger.Info("Simulator initialized with hash method: %s", sim.GetHashMethod().Name())
 	to.simulator = sim
 
 	to.logger.Info("Initializing storage...")
@@ -270,7 +272,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		trainingDataPath = filepath.Join(to.dataPath, "frames", "training_frames.json")
 	}
-	
+
 	if _, err := os.Stat(trainingDataPath); os.IsNotExist(err) {
 		return fmt.Errorf("training data not found at %s - please run the data encoder first", trainingDataPath)
 	}
@@ -312,10 +314,16 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 	to.logger.Info("Initializing evolutionary harness...")
 	harness := training.NewEvolutionaryHarness(*population)
 	// Set difficulty mask based on requested bit count
-	if *difficultyBits >= 8 && *difficultyBits <= 32 {
+	if *difficultyBits >= config.MinDifficultyBits && *difficultyBits <= config.MaxDifficultyBits {
 		mask := uint32(0xFFFFFFFF) << (32 - *difficultyBits)
 		harness.SetDifficultyMask(mask)
 		to.logger.Info("Difficulty set to %d bits (mask: 0x%08X)", *difficultyBits, mask)
+	} else {
+		to.logger.Warn("Invalid difficulty bits: %d (must be between %d and %d), using default: %d",
+			*difficultyBits, config.MinDifficultyBits, config.MaxDifficultyBits, config.DefaultDifficultyBits)
+		// Calculate mask at runtime to avoid constant overflow
+		var defaultMask uint32 = 0xFFF00000 // 12-bit default mask
+		harness.SetDifficultyMask(defaultMask)
 	}
 	to.harness = harness
 
@@ -639,9 +647,9 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 	}
 
 	// Immediately write best seed back to storage
-	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s", 
+	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s",
 		record.TargetToken, record.FeatureVector[0], record.SourceFile)
-	
+
 	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.FeatureVector, record.TargetToken, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {

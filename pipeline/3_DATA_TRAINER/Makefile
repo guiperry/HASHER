@@ -1,4 +1,12 @@
-.PHONY: all build test clean install run lint format help toolchain build-go docker-openwrt build-cuda firmware
+.PHONY: all build test clean install run lint format help toolchain build-go docker-openwrt build-cuda firmware cuda
+
+# CUDA Configuration
+CUDA_DIR := ../../pkg/hashing/methods/cuda
+CUDA_LIB := $(CUDA_DIR)/libcuda_hash.so
+CUDA_SRC := $(CUDA_DIR)/cuda_bridge.cu
+NVCC := /usr/local/cuda-12.6/bin/nvcc
+CUDA_ARCH := sm_52
+CUDA_FLAGS := -shared -Xcompiler -fPIC -arch=$(CUDA_ARCH) -O3
 
 # Application name 
 APP_NAME := data-trainer
@@ -20,9 +28,7 @@ GO_MOD_FILES := go.mod go.sum
 GO_VERSION := 1.21
 GOLANGCI_LINT_VERSION := v1.54.2
 
-# Detect local CUDA 10.2
-NVCC := $(shell command -v nvcc 2> /dev/null)
-CUDA_VERSION := $(shell nvcc --version | grep "release" | awk '{call split($6,a,"v"); print a[1]}')
+# CUDA is configured above
 
 
 help: ## Show this help message
@@ -33,7 +39,7 @@ help: ## Show this help message
 
 all: build ## Build the application
 
-build: ## Build the application binary
+build: $(CUDA_LIB) ## Build the application binary (includes CUDA)
 	@echo "Building $(APP_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	go build $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(APP_NAME) ./$(MAIN_PATH)
@@ -45,11 +51,11 @@ build-debug: ## Build the application with debug symbols
 
 run: build ## Build and run the application
 	@echo "Running $(APP_NAME)..."
-	./$(BUILD_DIR)/$(APP_NAME)
+	@LD_LIBRARY_PATH=$(CUDA_DIR):$$LD_LIBRARY_PATH ./$(BUILD_DIR)/$(APP_NAME)
 
 run-debug: build-debug ## Run the debug version
 	@echo "Running $(APP_NAME) (debug)..."
-	./$(BUILD_DIR)/$(APP_NAME)-debug
+	@LD_LIBRARY_PATH=$(CUDA_DIR):$$LD_LIBRARY_PATH ./$(BUILD_DIR)/$(APP_NAME)-debug
 
 test: ## Run all tests
 	@echo "Running tests..."
@@ -85,12 +91,12 @@ tidy: ## Tidy go modules
 	@echo "Tidying go modules..."
 	go mod tidy
 
-clean: ## Clean build artifacts
-	@echo "Cleaning..."
+clean: cuda-clean ## Clean all build artifacts
 	rm -rf $(BUILD_DIR)
 	rm -rf $(COVERAGE_DIR)
 	rm -f coverage.out
 	go clean -cache
+
 
 deps: ## Download dependencies
 	@echo "Downloading dependencies..."
@@ -260,8 +266,37 @@ docker-openwrt:
 	@echo "Packaging into OpenWRT Rootfs..."
 	docker build -t hasher-openwrt:latest -f Dockerfile.openwrt .
 
-clean:
-	rm -f bin/data-trainer
+# CUDA Build Targets
+cuda: $(CUDA_LIB) ## Build CUDA library
+
+cuda-check: ## Check CUDA availability
+	@echo "Checking CUDA availability..."
+	@$(NVCC) --version
+	@nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+
+$(CUDA_LIB): $(CUDA_SRC)
+	@echo "Building CUDA library..."
+	@echo "NVCC: $(NVCC)"
+	@echo "Architecture: $(CUDA_ARCH)"
+	@cd $(CUDA_DIR) && $(NVCC) $(CUDA_FLAGS) -o libcuda_hash.so cuda_bridge.cu
+	@echo "CUDA library built: $(CUDA_LIB)"
+
+cuda-clean: ## Clean CUDA build artifacts
+	@echo "Cleaning CUDA library..."
+	@rm -f $(CUDA_LIB)
+
+# Build everything including CUDA
+build-all: cuda build ## Build CUDA library and Go binary
+
+# Run with CUDA
+run-cuda: build-all ## Build and run with CUDA acceleration
+	@echo "Running with CUDA acceleration..."
+	@export LD_LIBRARY_PATH=$(CUDA_DIR):$$LD_LIBRARY_PATH && ./$(BUILD_DIR)/$(APP_NAME) -hash-method=cuda
+
+# Run with auto-detection (CUDA if available)
+run-auto: build-all ## Build and run with auto-detected hash method
+	@echo "Running with auto-detected hash method..."
+	@export LD_LIBRARY_PATH=$(CUDA_DIR):$$LD_LIBRARY_PATH && ./$(BUILD_DIR)/$(APP_NAME)
 
 # Default target
 .DEFAULT_GOAL := help
