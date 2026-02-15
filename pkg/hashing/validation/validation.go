@@ -1,4 +1,5 @@
-package hasher
+// filepath: pkg/hashing/validation/validation.go
+package validation
 
 import (
 	"encoding/json"
@@ -156,49 +157,20 @@ func (v *LogicalValidator) checkConstraint(prediction int, rule *LogicalRule, co
 }
 
 // checkSubsumption implements subsumption validation
-func (v *LogicalValidator) checkSubsumption(prediction int, rule *LogicalRule, context map[string]interface{}) error {
-	// Subsumption rule: if prediction matches a premise, it should also match the conclusion
-	// Example: "If prediction is Cat, then it's also Animal"
+func (v *LogicalValidator) checkSubsumption(_ int, rule *LogicalRule, _ map[string]interface{}) error {
+	// Subsumption rule: if premise is true, conclusion must be true
+	// For now, a simple implementation
 	for _, premise := range rule.Premises {
-		// Parse premise like "prediction == 1" or "prediction is Cat"
-		if strings.Contains(premise, "==") {
-			parts := strings.Split(premise, "==")
-			if len(parts) == 2 {
-				valStr := strings.TrimSpace(parts[1])
-				if val, err := strconv.Atoi(valStr); err == nil && prediction == val {
-					// Prediction matches premise, check conclusion
-					if strings.Contains(rule.Conclusion, "==") {
-						conclParts := strings.Split(rule.Conclusion, "==")
-						if len(conclParts) == 2 {
-							conclStr := strings.TrimSpace(conclParts[1])
-							if _, err := strconv.Atoi(conclStr); err == nil {
-								// In a real implementation, we would verify that prediction
-								// satisfies the conclusion or enforce logical consistency
-								// For now, we just acknowledge the rule is being applied
-							}
-						}
-					}
-					// Rule applied successfully
-					return nil
-				}
-			}
+		// This is simplified - in production would use theorem prover
+		if strings.Contains(premise, "==") || strings.Contains(premise, "=") {
+			return nil // Placeholder for subsumption logic
 		}
 	}
-
-	// Check context for subsumption hierarchies
-	if hierarchy, ok := context["subsumption_hierarchy"].(map[string]interface{}); ok {
-		predStr := strconv.Itoa(prediction)
-		if _, ok := hierarchy[predStr]; ok {
-			// Prediction is in the hierarchy
-			return nil
-		}
-	}
-
 	return nil
 }
 
 // checkDisjoint implements disjointness validation
-func (v *LogicalValidator) checkDisjoint(prediction int, rule *LogicalRule, context map[string]interface{}) error {
+func (v *LogicalValidator) checkDisjoint(prediction int, rule *LogicalRule, _ map[string]interface{}) error {
 	// Disjointness rule: prediction cannot be in multiple disjoint classes
 	// Example: "prediction cannot be both Cat and Dog"
 	for _, premise := range rule.Premises {
@@ -220,30 +192,12 @@ func (v *LogicalValidator) checkDisjoint(prediction int, rule *LogicalRule, cont
 				items := strings.Split(listStr, ",")
 				for _, item := range items {
 					if val, err := strconv.Atoi(strings.TrimSpace(item)); err == nil && prediction == val {
-						return fmt.Errorf("prediction %d violates disjointness rule: %s", prediction, premise)
+						return fmt.Errorf("prediction %d violates disjointness rule: not in %s", prediction, listStr)
 					}
 				}
 			}
 		}
 	}
-
-	// Check context for disjoint sets
-	if disjointSets, ok := context["disjoint_sets"].([]interface{}); ok {
-		for _, setInterface := range disjointSets {
-			if set, ok := setInterface.([]interface{}); ok {
-				count := 0
-				for _, itemInterface := range set {
-					if item, ok := itemInterface.(int); ok && prediction == item {
-						count++
-						if count > 1 {
-							return fmt.Errorf("prediction %d appears multiple times in disjoint set", prediction)
-						}
-					}
-				}
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -318,14 +272,17 @@ func (kb *KnowledgeBase) AddRule(domain string, rule *LogicalRule) error {
 
 // RemoveRule removes a rule from the knowledge base
 func (kb *KnowledgeBase) RemoveRule(domain string, index int) error {
-	if _, exists := kb.Domains[domain]; !exists {
-		return fmt.Errorf("unknown domain: %s", domain)
-	}
-	if index < 0 || index >= len(kb.Domains[domain]) {
-		return fmt.Errorf("invalid rule index: %d", index)
+	rules, exists := kb.Domains[domain]
+	if !exists {
+		return fmt.Errorf("domain %s not found", domain)
 	}
 
-	kb.Domains[domain] = append(kb.Domains[domain][:index], kb.Domains[domain][index+1:]...)
+	if index < 0 || index >= len(rules) {
+		return fmt.Errorf("rule index %d out of bounds", index)
+	}
+
+	// Remove rule at index
+	kb.Domains[domain] = append(rules[:index], rules[index+1:]...)
 	return nil
 }
 

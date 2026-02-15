@@ -172,7 +172,7 @@ Training progress is automatically checkpointed using:
 
 ```
 ├── cmd/
-│   └── trainer/           # Main application
+│   └── data-trainer/           # Main application
 ├── pkg/
 │   ├── training/          # Evolutionary algorithms
 │   ├── simulator/         # vHasher simulation

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/lab/hasher/data-trainer/pkg/training"
@@ -11,19 +12,18 @@ import (
 
 // ArrowSeedWriter handles incremental updates to Arrow files
 type ArrowSeedWriter struct {
-	sourceFile    string
-	outputFile    string
+	dataPath      string
 	mu            sync.Mutex
-	pendingWrites map[string][]byte
-	cachedRecords []*training.TrainingRecord
+	pendingWrites map[string]map[string][]byte
+	cachedRecords map[string][]*training.TrainingRecord
 }
 
 // NewArrowSeedWriter creates a new ArrowSeedWriter
-func NewArrowSeedWriter(sourceFile, outputFile string) *ArrowSeedWriter {
+func NewArrowSeedWriter(dataPath string) *ArrowSeedWriter {
 	return &ArrowSeedWriter{
-		sourceFile:    sourceFile,
-		outputFile:    outputFile,
-		pendingWrites: make(map[string][]byte),
+		dataPath:      dataPath,
+		pendingWrites: make(map[string]map[string][]byte),
+		cachedRecords: make(map[string][]*training.TrainingRecord),
 	}
 }
 
@@ -37,7 +37,7 @@ func (aw *ArrowSeedWriter) generateAsicKey(slots [12]uint32, targetTokenID int32
 }
 
 // AddSeedWrite queues a win
-func (aw *ArrowSeedWriter) AddSeedWrite(slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
+func (aw *ArrowSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
@@ -45,8 +45,17 @@ func (aw *ArrowSeedWriter) AddSeedWrite(slots [12]uint32, targetTokenID int32, b
 		return fmt.Errorf("cannot write empty seed")
 	}
 
+	// Use generic name if source is empty
+	if sourceFile == "" {
+		sourceFile = "training_frames.arrow"
+	}
+
+	if _, ok := aw.pendingWrites[sourceFile]; !ok {
+		aw.pendingWrites[sourceFile] = make(map[string][]byte)
+	}
+
 	key := aw.generateAsicKey(slots, targetTokenID)
-	aw.pendingWrites[key] = bestSeed
+	aw.pendingWrites[sourceFile][key] = bestSeed
 	return nil
 }
 
@@ -59,45 +68,66 @@ func (aw *ArrowSeedWriter) WriteBack() error {
 		return nil
 	}
 
-	// 1. Initialize cache if empty
-	if aw.cachedRecords == nil {
-		source := aw.outputFile
-		if _, err := os.Stat(source); os.IsNotExist(err) {
-			source = aw.sourceFile
+	for sourceFile, writes := range aw.pendingWrites {
+		if len(writes) == 0 {
+			continue
 		}
+
+		// Determine output file path
+		ext := filepath.Ext(sourceFile)
+		base := strings.TrimSuffix(filepath.Base(sourceFile), ext)
+		outputFile := filepath.Join(aw.dataPath, "frames", base+"_with_seeds"+ext)
 		
-		fmt.Printf("[DEBUG] ArrowSeedWriter: Initializing cache from %s\n", filepath.Base(source))
-		records, err := ReadTrainingRecordsFromArrowIPC(source)
-		if err != nil {
-			return fmt.Errorf("failed to read Arrow source: %w", err)
+		// If sourceFile is a full path, use it directly to find the source
+		sourcePath := sourceFile
+		if !filepath.IsAbs(sourcePath) {
+			sourcePath = filepath.Join(aw.dataPath, "frames", sourceFile)
 		}
-		aw.cachedRecords = records
-	}
 
-	// 2. Update records
-	updated := 0
-	for _, record := range aw.cachedRecords {
-		key := aw.generateAsicKey(record.FeatureVector, record.TargetToken)
+		// 1. Initialize cache for this file if empty
+		if _, ok := aw.cachedRecords[sourceFile]; !ok {
+			// Prefer output file if it exists (incremental update)
+			readPath := outputFile
+			if _, err := os.Stat(readPath); os.IsNotExist(err) {
+				readPath = sourcePath
+			}
+			
+			// Safety check
+			if _, err := os.Stat(readPath); os.IsNotExist(err) {
+				fmt.Printf("[WARN] ArrowSeedWriter: Source file not found: %s\n", readPath)
+				continue
+			}
 
-		if seed, ok := aw.pendingWrites[key]; ok {
-			record.BestSeed = seed
-			updated++
+			fmt.Printf("[DEBUG] ArrowSeedWriter: Initializing cache from %s\n", filepath.Base(readPath))
+			records, err := ReadTrainingRecordsFromArrowIPC(readPath)
+			if err != nil {
+				return fmt.Errorf("failed to read Arrow source %s: %w", readPath, err)
+			}
+			aw.cachedRecords[sourceFile] = records
 		}
-	}
 
-	// 3. Write back
-	if err := WriteTrainingRecordsToArrowIPC(aw.outputFile, aw.cachedRecords); err != nil {
-		return fmt.Errorf("failed to write output Arrow file: %w", err)
-	}
+		// 2. Update records
+		records := aw.cachedRecords[sourceFile]
+		updated := 0
+		for _, record := range records {
+			key := aw.generateAsicKey(record.FeatureVector, record.TargetToken)
 
-	// Clear pending writes but keep cache
-	aw.pendingWrites = make(map[string][]byte)
-	fmt.Printf("Successfully updated %d records in %s (total: %d)\n", updated, filepath.Base(aw.outputFile), len(aw.cachedRecords))
+			if seed, ok := writes[key]; ok {
+				record.BestSeed = seed
+				updated++
+			}
+		}
+
+		// 3. Write back
+		if err := WriteTrainingRecordsToArrowIPC(outputFile, records); err != nil {
+			return fmt.Errorf("failed to write output Arrow file %s: %w", outputFile, err)
+		}
+
+		fmt.Printf("Successfully updated %d records in %s (total: %d)\n", updated, filepath.Base(outputFile), len(records))
+		
+		// Clear writes for this file
+		delete(aw.pendingWrites, sourceFile)
+	}
 
 	return nil
-}
-
-// GetOutputFile returns the output file path
-func (aw *ArrowSeedWriter) GetOutputFile() string {
-	return aw.outputFile
 }

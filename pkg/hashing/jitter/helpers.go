@@ -79,11 +79,17 @@ func (hr *HelperRegistry) registerDefaultHelpers() {
 
 // flashSearchHelper implements the flash search BPF helper
 // arg1: hash value (first 4 bytes of hash) to lookup
+// arg2: pass number
 // returns: jitter vector (uint32 encoded in uint64)
-func (hr *HelperRegistry) flashSearchHelper(arg1, _, _, _, _ uint64) uint64 {
+func (hr *HelperRegistry) flashSearchHelper(arg1, arg2, _, _, _ uint64) uint64 {
 	hashKey := uint32(arg1)
+	pass := int(arg2)
+	
+	// In a real BPF environment, we would extract slots from a header pointer
+	// For this simulation helper, we use empty slots as placeholders
+	var slots [12]uint32
 
-	jitter, found := hr.engine.searcher.Search(hashKey)
+	jitter, found := hr.engine.searcher.Search(slots, hashKey, pass)
 	if !found {
 		jitter = hr.engine.searcher.GenerateDefaultJitter(hashKey)
 	}

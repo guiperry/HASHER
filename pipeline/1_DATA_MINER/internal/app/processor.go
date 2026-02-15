@@ -229,8 +229,8 @@ func embeddingWorker(id int, jobs <-chan string, results chan<- DocumentRecord, 
 			for j, chunk := range batch {
 				var tokens []string
 				var offsets []int32
-				var posTags []uint8
-				var tenses []uint8
+				var posTags []int
+				var tenses []int
 				var depHashes []uint32
 
 				if nlpBridge != nil {
@@ -562,21 +562,28 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 	fmt.Printf("🔄 Starting Continuous Workflow\n")
 	fmt.Printf("================================\n")
 
-	// 1. Ensure Ollama is running (for both embeddings and generation)
-	if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
-		fmt.Printf("⚠️  Warning: Failed to ensure Ollama is running: %v\n", err)
-	}
+	// 1. Ensure Ollama is running (if needed)
+	// Skip local server startup in Goat mode if Cloudflare is working
+	shouldSkipLocalServers := config.GoatMode && config.CloudflareEndpoint != ""
+	
+	if !shouldSkipLocalServers {
+		if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
+			fmt.Printf("⚠️  Warning: Failed to ensure Ollama is running: %v\n", err)
+		}
 
-	// 2. Try to start OpenCode server as a secondary provider
-	fmt.Println("🚀 Ensuring OpenCode server is running on port 5500...")
-	if !IsOpenCodeRunning() {
-		go func() {
-			exec.Command("opencode", "serve", "--port", "5500").Start()
-		}()
-		// Give it a moment to start
-		time.Sleep(2 * time.Second)
+		// 2. Try to start OpenCode server as a secondary provider
+		fmt.Println("🚀 Ensuring OpenCode server is running on port 5500...")
+		if !IsOpenCodeRunning() {
+			go func() {
+				exec.Command("opencode", "serve", "--port", "5500").Start()
+			}()
+			// Give it a moment to start
+			time.Sleep(2 * time.Second)
+		} else {
+			fmt.Println("✅ OpenCode server is already running")
+		}
 	} else {
-		fmt.Println("✅ OpenCode server is already running")
+		fmt.Println("💡 Skipping local Ollama/OpenCode startup (Goat mode + Cloudflare active)")
 	}
 
 	// 3. Smart model selection for Ollama (Embedding)
@@ -1212,16 +1219,20 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 			// 2. Extract NLP metadata
 			var tokens []string
 			var offsets []int32
-			var posTags []uint8
-			var tenses []uint8
+			var posTags []int
+			var tenses []int
 			var depHashes []uint32
+
+			// Use the full interaction text for NLP metadata to ensure token alignment
+			content := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+
 			if nlpBridge != nil {
-				tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(chunk)
+				tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(content)
 			}
 
 			// 3. Get embedding for the Alpaca record
 			// We embed Instruction + Input + Output to capture the full semantic meaning
-			embedText := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+			embedText := content
 			
 			// Check if we have quota left
 			providerStats := provider.GetProviderStats()
@@ -1284,6 +1295,7 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 				AlpacaRecord: *alpaca,
 				FileName:     file,
 				ChunkID:      int32(j),
+				Content:      content,
 				Embedding:    embedding,
 				Tokens:       tokens,
 				TokenOffsets: offsets,
@@ -1294,9 +1306,9 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 			
 			allAlpacaRecords = append(allAlpacaRecords, alpacaRecord)
 
-			recordBytes, err := json.MarshalIndent(alpacaRecord, "  ", "  ")
+			recordBytes, err := formatAlpacaRecord(alpacaRecord)
 			if err != nil {
-				fmt.Printf("⚠️  Failed to marshal JSON record: %v\n", err)
+				fmt.Printf("⚠️  Failed to format JSON record: %v\n", err)
 				continue
 			}
 
@@ -1349,6 +1361,38 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 
 	fmt.Printf("🎉 Neural processing phase completed: %d papers, %d Alpaca records\n", papersProcessed, totalEmbeddingsGenerated)
 	return papersProcessed, totalEmbeddingsGenerated, nil
+}
+
+// formatAlpacaRecord formats an AlpacaDocumentRecord with pretty-printed keys but compact arrays
+func formatAlpacaRecord(r AlpacaDocumentRecord) ([]byte, error) {
+	instruction, _ := json.Marshal(r.Instruction)
+	input, _ := json.Marshal(r.Input)
+	output, _ := json.Marshal(r.Output)
+	fileName, _ := json.Marshal(r.FileName)
+	content, _ := json.Marshal(r.Content)
+	embedding, _ := json.Marshal(r.Embedding)
+	tokens, _ := json.Marshal(r.Tokens)
+	offsets, _ := json.Marshal(r.TokenOffsets)
+	posTags, _ := json.Marshal(r.POSTags)
+	tenses, _ := json.Marshal(r.Tenses)
+	depHashes, _ := json.Marshal(r.DepHashes)
+
+	s := fmt.Sprintf(`  {
+    "instruction": %s,
+    "input": %s,
+    "output": %s,
+    "file_name": %s,
+    "chunk_id": %d,
+    "content": %s,
+    "embedding": %s,
+    "tokens": %s,
+    "token_offsets": %s,
+    "pos_tags": %s,
+    "tenses": %s,
+    "dep_hashes": %s
+  }`, instruction, input, output, fileName, r.ChunkID, content, embedding, tokens, offsets, posTags, tenses, depHashes)
+
+	return []byte(s), nil
 }
 
 // Helper function to format embedding array for JSON
@@ -1534,15 +1578,19 @@ func RunGoatMiningPhase(ctx context.Context, config *Config, provider *embedder.
 		// Extract NLP metadata
 		var tokens []string
 		var offsets []int32
-		var posTags []uint8
-		var tenses []uint8
+		var posTags []int
+		var tenses []int
 		var depHashes []uint32
+
+		// Use the full interaction text for NLP metadata to ensure token alignment
+		content := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+
 		if nlpBridge != nil {
-			tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(row.Input)
+			tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(content)
 		}
 
 		// Get embedding
-		embedText := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+		embedText := content
 		
 		fmt.Printf("🌐 Getting embedding for record %d...\n", i+1)
 		embedding, err := provider.GetEmbedding(embedText)
@@ -1556,6 +1604,7 @@ func RunGoatMiningPhase(ctx context.Context, config *Config, provider *embedder.
 			AlpacaRecord: *alpaca,
 			FileName:     fmt.Sprintf("hf://stallone/goat/%s", row.DocID),
 			ChunkID:      int32(i),
+			Content:      content,
 			Embedding:    embedding,
 			Tokens:       tokens,
 			TokenOffsets: offsets,
@@ -1570,7 +1619,7 @@ func RunGoatMiningPhase(ctx context.Context, config *Config, provider *embedder.
 		if !firstRecord {
 			jsonFile.WriteString(",")
 		}
-		recordBytes, _ := json.MarshalIndent(alpacaRecord, "  ", "  ")
+		recordBytes, _ := formatAlpacaRecord(alpacaRecord)
 		jsonFile.Write(recordBytes)
 		firstRecord = false
 

@@ -5,24 +5,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
 // JSONSeedWriter handles writing best seeds back to JSON with precise ASIC slot matching
 type JSONSeedWriter struct {
-	sourceFile    string
-	outputFile    string
+	dataPath      string
 	mu            sync.Mutex
-	pendingWrites map[string][]byte // composite key (asic_slots + target_token_id) -> best_seed
-	cachedRecords []map[string]interface{}
+	pendingWrites map[string]map[string][]byte // sourceFile -> (compositeKey -> best_seed)
+	cachedRecords map[string][]map[string]interface{}
 }
 
 // NewJSONSeedWriter creates a new JSONSeedWriter
-func NewJSONSeedWriter(sourceFile, outputFile string) *JSONSeedWriter {
+func NewJSONSeedWriter(dataPath string) *JSONSeedWriter {
 	return &JSONSeedWriter{
-		sourceFile:    sourceFile,
-		outputFile:    outputFile,
-		pendingWrites: make(map[string][]byte),
+		dataPath:      dataPath,
+		pendingWrites: make(map[string]map[string][]byte),
+		cachedRecords: make(map[string][]map[string]interface{}),
 	}
 }
 
@@ -36,7 +36,7 @@ func (sw *JSONSeedWriter) generateAsicKey(slots [12]uint32, targetTokenID int32)
 }
 
 // AddSeedWrite queues a best seed using ASIC slots + target token as the unique identifier
-func (sw *JSONSeedWriter) AddSeedWrite(slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
+func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -44,13 +44,22 @@ func (sw *JSONSeedWriter) AddSeedWrite(slots [12]uint32, targetTokenID int32, be
 		return fmt.Errorf("cannot write empty seed")
 	}
 
+	// Use generic name if source is empty
+	if sourceFile == "" {
+		sourceFile = "training_frames.json"
+	}
+
+	if _, ok := sw.pendingWrites[sourceFile]; !ok {
+		sw.pendingWrites[sourceFile] = make(map[string][]byte)
+	}
+
 	key := sw.generateAsicKey(slots, targetTokenID)
-	fmt.Printf("[DEBUG] JSONSeedWriter: Queuing win for Token %d, Slot0: %d\n", targetTokenID, slots[0])
-	sw.pendingWrites[key] = bestSeed
+	fmt.Printf("[DEBUG] JSONSeedWriter: Queuing win for Token %d in %s\n", targetTokenID, sourceFile)
+	sw.pendingWrites[sourceFile][key] = bestSeed
 	return nil
 }
 
-// WriteBack commits all pending writes to the output JSON file incrementally
+// WriteBack commits all pending writes to the appropriate output JSON files
 func (sw *JSONSeedWriter) WriteBack() error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -59,101 +68,121 @@ func (sw *JSONSeedWriter) WriteBack() error {
 		return nil
 	}
 
-	// 1. Initialize cache if empty
-	if sw.cachedRecords == nil {
-		// Prefer output file if it exists (incremental update)
-		source := sw.outputFile
-		if _, err := os.Stat(source); os.IsNotExist(err) {
-			source = sw.sourceFile
-		}
-		
-		fmt.Printf("[DEBUG] JSONSeedWriter: Initializing cache from %s\n", filepath.Base(source))
-		data, err := os.ReadFile(source)
-		if err != nil {
-			return fmt.Errorf("failed to read JSON source: %w", err)
+	for sourceFile, writes := range sw.pendingWrites {
+		if len(writes) == 0 {
+			continue
 		}
 
-		if err := json.Unmarshal(data, &sw.cachedRecords); err != nil {
-			return fmt.Errorf("failed to unmarshal JSON source: %w", err)
-		}
-	}
-
-	// 2. Update cached records
-	updated := 0
-	for i := range sw.cachedRecords {
-		record := sw.cachedRecords[i]
+		// Determine output file path
+		ext := filepath.Ext(sourceFile)
+		base := strings.TrimSuffix(filepath.Base(sourceFile), ext)
+		outputFile := filepath.Join(sw.dataPath, "frames", base+"_with_seeds"+ext)
 		
-		// Extract ASIC slots
-		var slots [12]uint32
-		foundSlots := true
-		for j := 0; j < 12; j++ {
-			key := fmt.Sprintf("asic_slot_%d", j)
-			valRaw, ok := record[key]
-			if !ok {
-				key = fmt.Sprintf("AsicSlots%d", j)
-				valRaw, ok = record[key]
+		// If sourceFile is a full path, use it directly to find the source
+		sourcePath := sourceFile
+		if !filepath.IsAbs(sourcePath) {
+			sourcePath = filepath.Join(sw.dataPath, "frames", sourceFile)
+		}
+
+		// 1. Initialize cache for this file if empty
+		if _, ok := sw.cachedRecords[sourceFile]; !ok {
+			// Prefer output file if it exists (incremental update)
+			readPath := outputFile
+			if _, err := os.Stat(readPath); os.IsNotExist(err) {
+				readPath = sourcePath
 			}
 			
-			if ok {
-				if valFloat, ok := valRaw.(float64); ok {
-					slots[j] = uint32(int32(valFloat))
+			// Safety check: if readPath doesn't exist, we can't do anything
+			if _, err := os.Stat(readPath); os.IsNotExist(err) {
+				fmt.Printf("[WARN] JSONSeedWriter: Source file not found: %s\n", readPath)
+				continue
+			}
+
+			fmt.Printf("[DEBUG] JSONSeedWriter: Initializing cache from %s\n", filepath.Base(readPath))
+			data, err := os.ReadFile(readPath)
+			if err != nil {
+				return fmt.Errorf("failed to read JSON source %s: %w", readPath, err)
+			}
+
+			var records []map[string]interface{}
+			if err := json.Unmarshal(data, &records); err != nil {
+				return fmt.Errorf("failed to unmarshal JSON source %s: %w", readPath, err)
+			}
+			sw.cachedRecords[sourceFile] = records
+		}
+
+		// 2. Update cached records
+		records := sw.cachedRecords[sourceFile]
+		updated := 0
+		for i := range records {
+			record := records[i]
+			
+			// Extract ASIC slots
+			var slots [12]uint32
+			foundSlots := true
+			for j := 0; j < 12; j++ {
+				key := fmt.Sprintf("asic_slot_%d", j)
+				valRaw, ok := record[key]
+				if !ok {
+					key = fmt.Sprintf("AsicSlots%d", j)
+					valRaw, ok = record[key]
+				}
+				
+				if ok {
+					if valFloat, ok := valRaw.(float64); ok {
+						slots[j] = uint32(int32(valFloat))
+					} else {
+						foundSlots = false
+						break
+					}
 				} else {
 					foundSlots = false
 					break
 				}
-			} else {
-				foundSlots = false
-				break
+			}
+
+			if !foundSlots {
+				continue
+			}
+
+			// Extract TargetTokenID
+			targetIDRaw, ok := record["target_token_id"].(float64)
+			if !ok {
+				targetIDRaw, _ = record["TargetTokenID"].(float64)
+			}
+			targetTokenID := int32(targetIDRaw)
+
+			key := sw.generateAsicKey(slots, targetTokenID)
+			if seed, ok := writes[key]; ok {
+				// Use original casing if present, default to snake_case
+				if _, exists := record["best_seed"]; exists {
+					record["best_seed"] = seed
+				} else if _, exists := record["BestSeed"]; exists {
+					record["BestSeed"] = seed
+				} else {
+					record["best_seed"] = seed
+				}
+				updated++
 			}
 		}
 
-		if !foundSlots {
-			continue
+		// 3. Persist to output file
+		newData, err := json.MarshalIndent(records, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal output JSON: %w", err)
 		}
 
-		// Extract TargetTokenID
-		targetIDRaw, ok := record["target_token_id"].(float64)
-		if !ok {
-			targetIDRaw, _ = record["TargetTokenID"].(float64)
+		if err := os.WriteFile(outputFile, newData, 0644); err != nil {
+			return fmt.Errorf("failed to write output JSON %s: %w", outputFile, err)
 		}
-		targetTokenID := int32(targetIDRaw)
 
-		key := sw.generateAsicKey(slots, targetTokenID)
-		if seed, ok := sw.pendingWrites[key]; ok {
-			fmt.Printf("[DEBUG] JSONSeedWriter: MATCH FOUND for Token %d, Slot0: %d\n", targetTokenID, slots[0])
-			
-			// Use original casing if present, default to snake_case
-			if _, exists := record["best_seed"]; exists {
-				record["best_seed"] = seed
-			} else if _, exists := record["BestSeed"]; exists {
-				record["BestSeed"] = seed
-			} else {
-				record["best_seed"] = seed
-			}
-			updated++
-		}
+		fmt.Printf("Successfully updated %d records in %s (total: %d)\n", updated, filepath.Base(outputFile), len(records))
+		
+		// Clear writes for this file
+		delete(sw.pendingWrites, sourceFile)
 	}
-
-	// 3. Persist to output file
-	newData, err := json.MarshalIndent(sw.cachedRecords, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal output JSON: %w", err)
-	}
-
-	if err := os.WriteFile(sw.outputFile, newData, 0644); err != nil {
-		return fmt.Errorf("failed to write output JSON: %w", err)
-	}
-
-	// Clear pending writes but keep cachedRecords for next WriteBack
-	sw.pendingWrites = make(map[string][]byte)
-	fmt.Printf("Successfully updated %d records in %s (total: %d)\n", updated, filepath.Base(sw.outputFile), len(sw.cachedRecords))
 
 	return nil
-}
-
-// GetOutputFile returns the output file path
-func (sw *JSONSeedWriter) GetOutputFile() string {
-	return sw.outputFile
 }
 
 // DualSeedWriter handles dual persistence to JSON and Arrow
@@ -164,24 +193,18 @@ type DualSeedWriter struct {
 
 // NewDualSeedWriter creates a new DualSeedWriter
 func NewDualSeedWriter(dataPath string) *DualSeedWriter {
-	framesDir := filepath.Join(dataPath, "frames")
-	jsonSource := filepath.Join(framesDir, "training_frames.json")
-	jsonOutput := filepath.Join(framesDir, "training_frames_with_seeds.json")
-	arrowSource := filepath.Join(framesDir, "training_frames.arrow")
-	arrowOutput := filepath.Join(framesDir, "training_frames_with_seeds.arrow")
-
 	return &DualSeedWriter{
-		jsonWriter:  NewJSONSeedWriter(jsonSource, jsonOutput),
-		arrowWriter: NewArrowSeedWriter(arrowSource, arrowOutput),
+		jsonWriter:  NewJSONSeedWriter(dataPath),
+		arrowWriter: NewArrowSeedWriter(dataPath),
 	}
 }
 
 // AddSeedWrite queues a win
-func (dsw *DualSeedWriter) AddSeedWrite(slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
-	if err := dsw.jsonWriter.AddSeedWrite(slots, targetTokenID, bestSeed); err != nil {
+func (dsw *DualSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
+	if err := dsw.jsonWriter.AddSeedWrite(sourceFile, slots, targetTokenID, bestSeed); err != nil {
 		return err
 	}
-	return dsw.arrowWriter.AddSeedWrite(slots, targetTokenID, bestSeed)
+	return dsw.arrowWriter.AddSeedWrite(sourceFile, slots, targetTokenID, bestSeed)
 }
 
 // WriteBack commits all pending wins
@@ -190,9 +213,4 @@ func (dsw *DualSeedWriter) WriteBack() error {
 		return err
 	}
 	return dsw.arrowWriter.WriteBack()
-}
-
-// GetOutputFile returns the primary JSON output file path
-func (dsw *DualSeedWriter) GetOutputFile() string {
-	return dsw.jsonWriter.GetOutputFile()
 }

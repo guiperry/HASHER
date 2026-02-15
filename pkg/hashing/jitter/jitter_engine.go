@@ -114,16 +114,32 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		// Step 2: Extract lookup key from hash
 		lookupKey := ExtractLookupKey(hash)
 
-		// Step 3: Flash search for jitter vector (Dimension Shift: Search 0, Retrieve 1)
+		// Step 2.5: Extract all 12 Slots from the header for the "Optiplex Logic"
+		// Header layout (80 bytes):
+		// [0-4] Version
+		// [4-36] PrevBlock (Slots 0-7)
+		// [36-52] MerkleRoot (Slots 8-11)
+		// [52-80] Time, Bits, Nonce
+		var slots [12]uint32
+		// Slots 0-7
+		for i := 0; i < 8; i++ {
+			slots[i] = binary.BigEndian.Uint32(state.Header[4+(i*4):])
+		}
+		// Slots 8-11
+		for i := 0; i < 4; i++ {
+			slots[i+8] = binary.BigEndian.Uint32(state.Header[36+(i*4):])
+		}
+
+		// Step 3: Flash search for jitter vector (Zone-Aware Logic)
 		var jitter JitterVector
 		var found bool
 
 		if rpcConn != nil && rpcErr == nil {
-			// Use high-speed Jitter RPC
-			jitter, found = je.getJitterRPC(rpcConn, lookupKey)
+			// Use high-speed Jitter RPC with full context
+			jitter, found = je.getJitterRPC(rpcConn, slots, lookupKey, pass)
 		} else if je.config.EnableFlashSearch {
-			// In-memory lookup
-			jitter, found = je.searcher.Search(lookupKey)
+			// In-memory lookup with full context
+			jitter, found = je.searcher.Search(slots, lookupKey, pass)
 		}
 
 		if !found {
@@ -191,18 +207,31 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 	return result, nil
 }
 
-func (je *JitterEngine) getJitterRPC(conn net.Conn, hash uint32) (JitterVector, bool) {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, hash)
+func (je *JitterEngine) getJitterRPC(conn net.Conn, slots [12]uint32, hash uint32, pass int) (JitterVector, bool) {
+	// Protocol: [Slots 48 bytes] + [Hash 4 bytes] + [Pass 4 bytes] = 56 bytes
+	buf := make([]byte, 56)
+	
+	// Pack Slots
+	for i := 0; i < 12; i++ {
+		binary.LittleEndian.PutUint32(buf[i*4:], slots[i])
+	}
+	
+	// Pack Hash
+	binary.LittleEndian.PutUint32(buf[48:52], hash)
+	
+	// Pack Pass
+	binary.LittleEndian.PutUint32(buf[52:56], uint32(pass))
+
 	if _, err := conn.Write(buf); err != nil {
 		return 0, false
 	}
 
-	if _, err := conn.Read(buf); err != nil {
+	resp := make([]byte, 4)
+	if _, err := conn.Read(resp); err != nil {
 		return 0, false
 	}
 
-	return JitterVector(binary.LittleEndian.Uint32(buf)), true
+	return JitterVector(binary.LittleEndian.Uint32(resp)), true
 }
 
 // Execute21PassLoopBatch processes multiple headers in batch

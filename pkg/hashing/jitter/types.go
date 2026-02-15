@@ -11,6 +11,19 @@ import (
 // Default number of passes in the temporal loop
 const DefaultPassCount = 21
 
+// Domain Signature Constants (Slot 10)
+const (
+	DOMAIN_PROSE     uint32 = 0x1000
+	DOMAIN_ACADEMIC  uint32 = 0x1100
+	DOMAIN_MATH      uint32 = 0x2000
+	DOMAIN_LOGIC     uint32 = 0x2100
+	DOMAIN_CODE      uint32 = 0x3000
+	DOMAIN_MARKUP    uint32 = 0x3100
+	DOMAIN_FINANCIAL uint32 = 0x4000
+	DOMAIN_TECHNICAL uint32 = 0x5000
+	DOMAIN_DEBUG     uint32 = 0xFFFF
+)
+
 // JitterVector represents a single jitter value injected into the hash state
 type JitterVector uint32
 

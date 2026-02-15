@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -116,6 +117,10 @@ func arrowBatchToTrainingRecords(batch array.Record) ([]*training.TrainingRecord
 				}
 			}
 			if hasSeed {
+				// Log skip only occasionally to avoid noise
+				if i%100 == 0 {
+					fmt.Printf("[DEBUG] Skipping already trained record %d in Arrow batch\n", i)
+				}
 				continue
 			}
 		}

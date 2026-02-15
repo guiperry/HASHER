@@ -21,6 +21,9 @@ func GetDocumentRecordArrowSchema() *arrow.Schema {
 		{Name: "pos_tags", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
 		{Name: "tenses", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
 		{Name: "dep_hashes", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint32), Nullable: false},
+		{Name: "instruction", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "input", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "output", Type: arrow.BinaryTypes.String, Nullable: false},
 	}, nil)
 }
 
@@ -73,6 +76,18 @@ func arrowBatchToDocumentRecords(batch array.Record) ([]DocumentRecord, error) {
 	posTagsCol := batch.Column(6).(*array.List)
 	tensesCol := batch.Column(7).(*array.List)
 	depHashesCol := batch.Column(8).(*array.List)
+	
+	// Optional Alpaca fields (columns 9, 10, 11)
+	var instrCol, inputCol, outputCol *array.String
+	if batch.NumCols() > 9 {
+		instrCol = batch.Column(9).(*array.String)
+	}
+	if batch.NumCols() > 10 {
+		inputCol = batch.Column(10).(*array.String)
+	}
+	if batch.NumCols() > 11 {
+		outputCol = batch.Column(11).(*array.String)
+	}
 
 	// Convert each row
 	for i := 0; i < int(batch.NumRows()); i++ {
@@ -122,7 +137,7 @@ func arrowBatchToDocumentRecords(batch array.Record) ([]DocumentRecord, error) {
 		depHashesSlice := make([]uint32, depHashesLength)
 		copy(depHashesSlice, depHashesValues[depHashesOffset:depHashesOffset+depHashesLength])
 
-		records = append(records, DocumentRecord{
+		doc := DocumentRecord{
 			FileName:     fileNameCol.Value(i),
 			ChunkID:      chunkIDCol.Value(i),
 			Content:      contentCol.Value(i),
@@ -132,7 +147,19 @@ func arrowBatchToDocumentRecords(batch array.Record) ([]DocumentRecord, error) {
 			POSTags:      posTagsSlice,
 			Tenses:       tensesSlice,
 			DepHashes:    depHashesSlice,
-		})
+		}
+
+		if instrCol != nil {
+			doc.Instruction = instrCol.Value(i)
+		}
+		if inputCol != nil {
+			doc.Input = inputCol.Value(i)
+		}
+		if outputCol != nil {
+			doc.Output = outputCol.Value(i)
+		}
+
+		records = append(records, doc)
 	}
 
 	return records, nil

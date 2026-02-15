@@ -158,7 +158,7 @@ func (m *SoftwareMethod) Execute21PassLoop(header []byte, targetTokenID uint32) 
 	jitterEngine := jitter.NewJitterEngine(jitterConfig)
 	
 	// Load associative memory
-	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	m.populateSearcher(jitterEngine)
 
 	// Set the hash method to use our software implementation
 	jitterEngine.SetHashMethod(&SoftwareHashMethod{})
@@ -204,7 +204,7 @@ func (m *SoftwareMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte
 	jitterEngine := jitter.NewJitterEngine(jitterConfig)
 	
 	// Load associative memory
-	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
+	m.populateSearcher(jitterEngine)
 	
 	jitterEngine.SetHashMethod(&SoftwareHashMethod{})
 
@@ -215,6 +215,21 @@ func (m *SoftwareMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte
 	}
 
 	return result.FullSeed, nil
+}
+
+func (m *SoftwareMethod) populateSearcher(je *jitter.JitterEngine) {
+	frames := make([]jitter.TrainingFrame, 0, len(m.jitterTable))
+	for k, v := range m.jitterTable {
+		var slots [12]uint32
+		slots[0] = k // Slot 0: Anchor
+		slots[1] = v // Slot 1: Jitter
+		// Other slots default to 0
+		
+		frames = append(frames, jitter.TrainingFrame{
+			AsicSlots: slots,
+		})
+	}
+	je.GetSearcher().BuildFromTrainingData(frames)
 }
 
 // LoadJitterTable loads associative memory for flash search jitter lookup

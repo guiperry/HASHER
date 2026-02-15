@@ -555,6 +555,7 @@ func (di *DataIngestor) readCSVAndConvert(csvPath string) ([]*training.TrainingR
 func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.TrainingRecord {
 	// Skip records that already have a best seed
 	if len(jr.BestSeed) > 0 {
+		di.logger.Debug("Skipping already trained JSON record for token %d", jr.TargetTokenID)
 		return nil
 	}
 
@@ -584,6 +585,7 @@ func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.Trai
 func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *training.TrainingRecord {
 	// Skip records that already have a best seed
 	if len(pr.BestSeed) > 0 {
+		di.logger.Debug("Skipping already trained Parquet record for token %d", pr.TargetTokenID)
 		return nil
 	}
 

@@ -12,17 +12,18 @@ import (
 // GetAlpacaDocumentRecordArrowSchema returns the Arrow schema for AlpacaDocumentRecord
 func GetAlpacaDocumentRecordArrowSchema() *arrow.Schema {
 	return arrow.NewSchema([]arrow.Field{
-		{Name: "instruction", Type: arrow.BinaryTypes.String, Nullable: false},
-		{Name: "input", Type: arrow.BinaryTypes.String, Nullable: false},
-		{Name: "output", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "file_name", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "chunk_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "content", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "embedding", Type: arrow.ListOf(arrow.PrimitiveTypes.Float32), Nullable: false},
 		{Name: "tokens", Type: arrow.ListOf(arrow.BinaryTypes.String), Nullable: false},
 		{Name: "token_offsets", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32), Nullable: false},
 		{Name: "pos_tags", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
 		{Name: "tenses", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
 		{Name: "dep_hashes", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint32), Nullable: false},
+		{Name: "instruction", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "input", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "output", Type: arrow.BinaryTypes.String, Nullable: false},
 	}, nil)
 }
 
@@ -58,20 +59,14 @@ func alpacaDocumentRecordsToArrowBatch(records []AlpacaDocumentRecord, mem memor
 	schema := GetAlpacaDocumentRecordArrowSchema()
 
 	// Create builders for each field
-	instructionBuilder := array.NewStringBuilder(mem)
-	defer instructionBuilder.Release()
-
-	inputBuilder := array.NewStringBuilder(mem)
-	defer inputBuilder.Release()
-
-	outputBuilder := array.NewStringBuilder(mem)
-	defer outputBuilder.Release()
-
 	fileNameBuilder := array.NewStringBuilder(mem)
 	defer fileNameBuilder.Release()
 
 	chunkIDBuilder := array.NewInt32Builder(mem)
 	defer chunkIDBuilder.Release()
+
+	contentBuilder := array.NewStringBuilder(mem)
+	defer contentBuilder.Release()
 
 	embeddingBuilder := array.NewListBuilder(mem, arrow.PrimitiveTypes.Float32)
 	defer embeddingBuilder.Release()
@@ -91,13 +86,20 @@ func alpacaDocumentRecordsToArrowBatch(records []AlpacaDocumentRecord, mem memor
 	depHashesBuilder := array.NewListBuilder(mem, arrow.PrimitiveTypes.Uint32)
 	defer depHashesBuilder.Release()
 
+	instructionBuilder := array.NewStringBuilder(mem)
+	defer instructionBuilder.Release()
+
+	inputBuilder := array.NewStringBuilder(mem)
+	defer inputBuilder.Release()
+
+	outputBuilder := array.NewStringBuilder(mem)
+	defer outputBuilder.Release()
+
 	// Build arrays
 	for _, record := range records {
-		instructionBuilder.Append(record.Instruction)
-		inputBuilder.Append(record.Input)
-		outputBuilder.Append(record.Output)
 		fileNameBuilder.Append(record.FileName)
 		chunkIDBuilder.Append(record.ChunkID)
+		contentBuilder.Append(record.Content)
 
 		// Build embedding array
 		embeddingBuilder.Append(true)
@@ -117,40 +119,49 @@ func alpacaDocumentRecordsToArrowBatch(records []AlpacaDocumentRecord, mem memor
 		// Build pos_tags array
 		posTagsBuilder.Append(true)
 		pb := posTagsBuilder.ValueBuilder().(*array.Uint8Builder)
-		pb.AppendValues(record.POSTags, nil)
+		posTagsUint8 := make([]uint8, len(record.POSTags))
+		for j, v := range record.POSTags {
+			posTagsUint8[j] = uint8(v)
+		}
+		pb.AppendValues(posTagsUint8, nil)
 
 		// Build tenses array
 		tensesBuilder.Append(true)
 		tensb := tensesBuilder.ValueBuilder().(*array.Uint8Builder)
-		tensb.AppendValues(record.Tenses, nil)
+		tensesUint8 := make([]uint8, len(record.Tenses))
+		for j, v := range record.Tenses {
+			tensesUint8[j] = uint8(v)
+		}
+		tensb.AppendValues(tensesUint8, nil)
 
 		// Build dep_hashes array
 		depHashesBuilder.Append(true)
 		db := depHashesBuilder.ValueBuilder().(*array.Uint32Builder)
 		db.AppendValues(record.DepHashes, nil)
+
+		instructionBuilder.Append(record.Instruction)
+		inputBuilder.Append(record.Input)
+		outputBuilder.Append(record.Output)
 	}
 
 	// Build arrays
-	instructionArr := instructionBuilder.NewArray()
-	defer instructionArr.Release()
-
-	inputArr := inputBuilder.NewArray()
-	defer inputArr.Release()
-
-	outputArr := outputBuilder.NewArray()
-	defer outputArr.Release()
-
 	fileNameArr := fileNameBuilder.NewArray()
 	defer fileNameArr.Release()
 
 	chunkIDArr := chunkIDBuilder.NewArray()
 	defer chunkIDArr.Release()
 
+	contentArr := contentBuilder.NewArray()
+	defer contentArr.Release()
+
 	embeddingArr := embeddingBuilder.NewArray()
 	defer embeddingArr.Release()
 
 	tokensArr := tokensBuilder.NewArray()
 	defer tokensArr.Release()
+
+	tokenOffsetsArr := tokenOffsetsBuilder.NewArray()
+	defer tokenOffsetsArr.Release()
 
 	posTagsArr := posTagsBuilder.NewArray()
 	defer posTagsArr.Release()
@@ -161,12 +172,18 @@ func alpacaDocumentRecordsToArrowBatch(records []AlpacaDocumentRecord, mem memor
 	depHashesArr := depHashesBuilder.NewArray()
 	defer depHashesArr.Release()
 
-	tokenOffsetsArr := tokenOffsetsBuilder.NewArray()
-	defer tokenOffsetsArr.Release()
+	instructionArr := instructionBuilder.NewArray()
+	defer instructionArr.Release()
+
+	inputArr := inputBuilder.NewArray()
+	defer inputArr.Release()
+
+	outputArr := outputBuilder.NewArray()
+	defer outputArr.Release()
 
 	// Create record
 	var cols []array.Interface
-	cols = append(cols, instructionArr, inputArr, outputArr, fileNameArr, chunkIDArr, embeddingArr, tokensArr, tokenOffsetsArr, posTagsArr, tensesArr, depHashesArr)
+	cols = append(cols, fileNameArr, chunkIDArr, contentArr, embeddingArr, tokensArr, tokenOffsetsArr, posTagsArr, tensesArr, depHashesArr, instructionArr, inputArr, outputArr)
 	
 	return array.NewRecord(schema, cols, int64(len(records))), nil
 }
@@ -269,12 +286,20 @@ func documentRecordsToArrowBatch(records []DocumentRecord, mem memory.Allocator)
 		// Build pos_tags array
 		posTagsBuilder.Append(true)
 		pb := posTagsBuilder.ValueBuilder().(*array.Uint8Builder)
-		pb.AppendValues(record.POSTags, nil)
+		posTagsUint8 := make([]uint8, len(record.POSTags))
+		for j, v := range record.POSTags {
+			posTagsUint8[j] = uint8(v)
+		}
+		pb.AppendValues(posTagsUint8, nil)
 
 		// Build tenses array
 		tensesBuilder.Append(true)
 		tensb := tensesBuilder.ValueBuilder().(*array.Uint8Builder)
-		tensb.AppendValues(record.Tenses, nil)
+		tensesUint8 := make([]uint8, len(record.Tenses))
+		for j, v := range record.Tenses {
+			tensesUint8[j] = uint8(v)
+		}
+		tensb.AppendValues(tensesUint8, nil)
 
 		// Build dep_hashes array
 		depHashesBuilder.Append(true)
@@ -398,15 +423,19 @@ func arrowBatchToDocumentRecords(batch array.Record) ([]DocumentRecord, error) {
 		posTagsOffset := posTagsCol.Offsets()[i]
 		posTagsLength := posTagsCol.Offsets()[i+1] - posTagsOffset
 		posTagsValues := posTagsCol.ListValues().(*array.Uint8).Uint8Values()
-		posTagsSlice := make([]uint8, posTagsLength)
-		copy(posTagsSlice, posTagsValues[posTagsOffset:posTagsOffset+posTagsLength])
+		posTagsSlice := make([]int, posTagsLength)
+		for j := 0; j < int(posTagsLength); j++ {
+			posTagsSlice[j] = int(posTagsValues[int(posTagsOffset)+j])
+		}
 
 		// Get tenses
 		tensesOffset := tensesCol.Offsets()[i]
 		tensesLength := tensesCol.Offsets()[i+1] - tensesOffset
 		tensesValues := tensesCol.ListValues().(*array.Uint8).Uint8Values()
-		tensesSlice := make([]uint8, tensesLength)
-		copy(tensesSlice, tensesValues[tensesOffset:tensesOffset+tensesLength])
+		tensesSlice := make([]int, tensesLength)
+		for j := 0; j < int(tensesLength); j++ {
+			tensesSlice[j] = int(tensesValues[int(tensesOffset)+j])
+		}
 
 		// Get dep_hashes
 		depHashesOffset := depHashesCol.Offsets()[i]

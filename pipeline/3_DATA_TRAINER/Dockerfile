@@ -43,7 +43,7 @@ COPY pkg/simulator/ebpf_maps.h ./pkg/simulator/
 COPY pkg/simulator/neural_kernel.c ./pkg/simulator/
 COPY pkg/simulator/hardware_prep.go ./pkg/simulator/
 COPY pkg/training/ ./pkg/training/
-COPY cmd/trainer/ ./cmd/trainer/
+COPY cmd/data-trainer/ ./cmd/data-trainer/
 COPY internal/ ./internal/
 COPY go.mod go.sum ./
 COPY pkg/simulator/cuda_bridge.cu ./pkg/simulator/
@@ -72,7 +72,7 @@ COPY --from=builder /app/pkg/simulator/hardware_prep.go ./pkg/simulator/
 COPY --from=builder /app/pkg/simulator/cuda_bridge.cu ./pkg/simulator/
 COPY --from=builder /app/pkg/training/ ./pkg/training/
 COPY --from=builder /app/internal/ ./internal/
-COPY --from=builder /app/cmd/trainer/ ./cmd/trainer/
+COPY --from=builder /app/cmd/data-trainer/ ./cmd/data-trainer/
 COPY --from=builder /app/go.mod ./go.mod
 COPY --from=builder /app/go.sum ./go.sum
 
@@ -89,7 +89,7 @@ VOLUME /app/data
 
 # Build the Go trainer application
 RUN cd /app && \
-    /usr/local/go/bin/go build -ldflags "-w -s" -o /app/bin/data-trainer ./cmd/trainer/
+    /usr/local/go/bin/go build -ldflags "-w -s" -o /app/bin/data-trainer ./cmd/data-trainer/
 
 # Set working directory
 WORKDIR /app

@@ -47,7 +47,7 @@ func (nb *NLPBridge) Close() {
 }
 
 // ProcessText extracts linguistic features from text
-func (nb *NLPBridge) ProcessText(text string) (words []string, offsets []int32, posTags []uint8, tenses []uint8, depHashes []uint32) {
+func (nb *NLPBridge) ProcessText(text string) (words []string, offsets []int32, posTags []int, tenses []int, depHashes []uint32) {
 	// Limit text size to prevent memory issues with spaCy
 	const maxTextLength = 50000
 	if len(text) > maxTextLength {
@@ -74,16 +74,16 @@ func (nb *NLPBridge) ProcessText(text string) (words []string, offsets []int32, 
 
 	words = make([]string, len(tokens))
 	offsets = make([]int32, len(tokens))
-	posTags = make([]uint8, len(tokens))
-	tenses = make([]uint8, len(tokens))
+	posTags = make([]int, len(tokens))
+	tenses = make([]int, len(tokens))
 	depHashes = make([]uint32, len(tokens))
 
 	for i, t := range tokens {
 		words[i] = t.Text
 		offsets[i] = int32(t.Start)
-		posTags[i] = MapPOSTag(t.POS)
+		posTags[i] = int(MapPOSTag(t.POS))
 		depHashes[i] = HashDependency(t.Dep)
-		tenses[i] = 0
+		tenses[i] = int(DetectTense(t.Tag))
 	}
 
 	return
@@ -128,6 +128,20 @@ func MapPOSTag(pos string) uint8 {
 		return 0x11
 	case "SPACE":
 		return 0x12
+	default:
+		return 0x00
+	}
+}
+
+// DetectTense maps fine-grained SpaCy tags to tense IDs (from DATA-MAPPER.md spec)
+func DetectTense(tag string) uint8 {
+	switch strings.ToUpper(tag) {
+	case "VBD", "VBN": // Past tense, Past participle
+		return 0x01
+	case "VBG", "VBP", "VBZ": // Present participle, Non-3rd person present, 3rd person present
+		return 0x02
+	case "MD": // Modal (often used for future/conditional)
+		return 0x03
 	default:
 		return 0x00
 	}

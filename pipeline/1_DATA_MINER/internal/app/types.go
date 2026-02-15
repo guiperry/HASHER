@@ -10,8 +10,8 @@ type DocumentRecord struct {
 	// NLP Metadata (from NLP Bridge)
 	Tokens       []string `parquet:"name=tokens, type=LIST, valuetype=BYTE_ARRAY, valueconvertedtype=UTF8"`
 	TokenOffsets []int32  `parquet:"name=token_offsets, type=LIST, valuetype=INT32"`
-	POSTags      []uint8  `parquet:"name=pos_tags, type=LIST, valuetype=INT32"`
-	Tenses       []uint8  `parquet:"name=tenses, type=LIST, valuetype=INT32"`
+	POSTags      []int    `parquet:"name=pos_tags, type=LIST, valuetype=INT32"`
+	Tenses       []int    `parquet:"name=tenses, type=LIST, valuetype=INT32"`
 	DepHashes    []uint32 `parquet:"name=dep_hashes, type=LIST, valuetype=INT32"`
 }
 
@@ -27,13 +27,14 @@ type AlpacaDocumentRecord struct {
 	AlpacaRecord
 	FileName  string    `json:"file_name"`
 	ChunkID   int32     `json:"chunk_id"`
+	Content   string    `json:"content"`
 	Embedding []float32 `json:"embedding"`
 
 	// NLP Metadata (from NLP Bridge)
 	Tokens       []string `json:"tokens"`
 	TokenOffsets []int32  `json:"token_offsets"`
-	POSTags      []uint8  `json:"pos_tags"`
-	Tenses       []uint8  `json:"tenses"`
+	POSTags      []int    `json:"pos_tags"`
+	Tenses       []int    `json:"tenses"`
 	DepHashes    []uint32 `json:"dep_hashes"`
 }
 

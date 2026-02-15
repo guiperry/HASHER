@@ -339,7 +339,7 @@ build-data-encoder:
 
 ## build-data-trainer: Build data trainer pipeline binary
 build-data-trainer:
-	$(call build-pipeline-binary,data-trainer,3_DATA_TRAINER,./cmd/trainer)
+	$(call build-pipeline-binary,data-trainer,3_DATA_TRAINER,./cmd/data-trainer)
 
 ## build-pipeline-all: Build all pipeline binaries
 build-pipeline-all: build-data-miner build-data-encoder build-data-trainer

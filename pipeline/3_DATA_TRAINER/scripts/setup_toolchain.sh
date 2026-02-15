@@ -39,6 +39,6 @@ clang -O2 -target bpf -c pkg/simulator/neural_kernel_ubpf.c -o pkg/simulator/neu
 clang -O2 -target bpf -c pkg/simulator/neural_kernel.c -o pkg/simulator/neural_kernel.o
 
 # 4. Build the Go Trainer
-go build -o bin/data-trainer ./cmd/trainer/
+go build -o bin/data-trainer ./cmd/data-trainer/
 
 echo "[✓] Toolchain Ready. libubpf.so and libcuda_bridge.so are linked."

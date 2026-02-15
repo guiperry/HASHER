@@ -2,7 +2,7 @@
 
 # Application name 
 APP_NAME := data-trainer
-MAIN_PATH := cmd/trainer
+MAIN_PATH := cmd/data-trainer
 
 # Go build flags
 BUILD_FLAGS := -v
@@ -113,20 +113,6 @@ install: build ## Install the application
 toolchain:
 	bash setup_toolchain.sh
 	
-
-
-
-# CUDA/eBPF compilation targets
-compile-ebpf: ## Compile eBPF kernel
-	@echo "Compiling eBPF kernel..."
-	clang -O2 -target bpf -c pkg/simulator/neural_kernel.c -o pkg/simulator/neural_kernel.o
-	clang -O2 -target bpf -c pkg/simulator/neural_kernel_ubpf.c -o pkg/simulator/neural_kernel_ubpf.o
-
-compile-cuda: ## Compile CUDA bridge
-	@echo "Compiling CUDA bridge..."
-	nvcc -Xcompiler -fPIC -shared -o pkg/simulator/libcuda_bridge.so pkg/simulator/cuda_bridge.cu
-
-compile-all: compile-ebpf docker-build-native ## Compile all native components
 
 
 
@@ -251,11 +237,11 @@ version: ## Show version information
 trainer: build ## Build trainer specifically
 	@echo "Building trainer..."
 	@mkdir -p $(BUILD_DIR)
-	go build $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/trainer ./cmd/trainer
+	go build $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/data-trainer ./cmd/data-trainer
 
 run-trainer: trainer ## Run trainer
 	@echo "Running trainer..."
-	./$(BUILD_DIR)/trainer
+	./$(BUILD_DIR)/data-trainer
 
 validate: ## Validate training data
 	@echo "Validating training data..."
@@ -264,15 +250,10 @@ validate: ## Validate training data
 benchmark: test-bench ## Run performance benchmarks
 
 
-# 1. Build the Bridge using Host CUDA 10.2 (Match your drivers!)
-build-cuda:
-	@echo "Building CUDA Bridge for version $(CUDA_VERSION)..."
-	nvcc -Xcompiler -fPIC -shared -o pkg/simulator/libcuda_bridge.so pkg/simulator/cuda_bridge.cu
-
 # 2. Build the Go Trainer (Links to local libubpf.so)
 build-go:
 	@echo "Building HASHER Data Trainer..."
-	go build -o bin/data-trainer ./cmd/trainer/
+	go build -o bin/data-trainer ./cmd/data-trainer/
 
 # 3. Build the Lean OpenWRT Testbed
 docker-openwrt:
@@ -280,7 +261,7 @@ docker-openwrt:
 	docker build -t hasher-openwrt:latest -f Dockerfile.openwrt .
 
 clean:
-	rm -f bin/data-trainer pkg/simulator/libcuda_bridge.so
+	rm -f bin/data-trainer
 
 # Default target
 .DEFAULT_GOAL := help

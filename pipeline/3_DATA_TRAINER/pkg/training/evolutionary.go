@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lab/hasher/data-trainer/pkg/simulator"
+	"hasher/pkg/hashing/hardware"
 )
 
 const (
@@ -470,7 +471,7 @@ func (eh *EvolutionaryHarness) CalculateReward(seed []byte, targetToken int32, t
 	}
 
 	// Create temporary hardware prep
-	hwPrep := simulator.NewHardwarePrep(false)
+	hwPrep := hardware.NewHardwarePrep(false)
 
 	// Build Bitcoin header with the nonce from this seed
 	bitcoinHeader := hwPrep.PrepareAsicJob(tempSlots, nonce)
@@ -777,7 +778,7 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 	slots := record.FeatureVector
 
 	// Create hardware prep for batch processing
-	hwPrep := simulator.NewHardwarePrep(true) // Enable caching for performance
+	hwPrep := hardware.NewHardwarePrep(true) // Enable caching for performance
 
 	// Generate Bitcoin headers for all candidate nonces in batch
 	headers := hwPrep.PrepareAsicJobBatch(slots, candidateNonces)

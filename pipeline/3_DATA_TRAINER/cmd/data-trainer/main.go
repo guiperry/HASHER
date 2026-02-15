@@ -22,6 +22,7 @@ import (
 	"github.com/lab/hasher/data-trainer/pkg/storage"
 	"github.com/lab/hasher/data-trainer/pkg/training"
 	"github.com/lab/hasher/data-trainer/pkg/validator"
+	"hasher/pkg/hashing/jitter"
 )
 
 var (
@@ -36,9 +37,8 @@ var (
 )
 
 type seedWriterInterface interface {
-	AddSeedWrite(slots [12]uint32, targetTokenID int32, bestSeed []byte) error
+	AddSeedWrite(sourceFile string, slots [12]uint32, targetTokenID int32, bestSeed []byte) error
 	WriteBack() error
-	GetOutputFile() string
 }
 
 type TrainingOrchestrator struct {
@@ -356,7 +356,7 @@ func (to *TrainingOrchestrator) initializeComponents() error {
 
 	// Start Jitter RPC Server
 	to.logger.Info("Starting Jitter RPC Server on /tmp/jitter.sock...")
-	jitterServer := simulator.NewJitterServer("/tmp/jitter.sock", to.flashManager.GetAssociativeJitter)
+	jitterServer := jitter.NewServer("/tmp/jitter.sock", to.flashManager.GetAssociativeJitter)
 	if err := jitterServer.Start(); err != nil {
 		to.logger.Warn("Failed to start Jitter Server: %v", err)
 	} else {
@@ -642,7 +642,7 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s", 
 		record.TargetToken, record.FeatureVector[0], record.SourceFile)
 	
-	if err := to.seedWriter.AddSeedWrite(record.FeatureVector, record.TargetToken, seed.Seed); err != nil {
+	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.FeatureVector, record.TargetToken, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {
 		if err := to.seedWriter.WriteBack(); err != nil {

@@ -85,8 +85,8 @@ func (fm *FlashManager) SetKnowledgeBase(records []*training.TrainingRecord) {
 	fmt.Printf("[FLASH] Knowledge Base loaded with %d records\n", len(fm.knowledgeBase))
 }
 
-// GetAssociativeJitter implements the "Search Slot 0, Retrieve Slot 1" logic
-func (fm *FlashManager) GetAssociativeJitter(currentHash uint32) uint32 {
+// GetAssociativeJitter implements the 21-Pass Zone Logic (Topic -> Grammar -> Identity)
+func (fm *FlashManager) GetAssociativeJitter(slots [12]uint32, currentHash uint32, pass int) uint32 {
 	fm.mutex.RLock()
 	defer fm.mutex.RUnlock()
 
@@ -94,34 +94,107 @@ func (fm *FlashManager) GetAssociativeJitter(currentHash uint32) uint32 {
 		return currentHash ^ 0xDEADBEEF // Fallback
 	}
 
-	// 1. Search for nearest neighbor based on Slot 0
-	// We treat currentHash as a coordinate in the Slot 0 space
-	var bestIdx int
-	minDiff := ^uint32(0) // Max uint32
+	// Zone 1: The Topic Filter (Passes 0-7)
+	// Focus: Slot 0 (The Anchor)
+	if pass <= 7 {
+		targetSlot0 := slots[0]
+		// Find neighbor with closest Slot 0
+		// In a real implementation, we would use an index. For now, linear scan.
+		// "If the hash drifts... return High-Entropy Jitter."
+		// Here we return the Jitter (Slot 1) of the "Topic Neighbor".
+		
+		var bestIdx int = -1
+		minDiff := ^uint32(0)
 
-	for i, record := range fm.knowledgeBase {
-		// Calculate distance between currentHash and Slot 0
-		slot0 := record.FeatureVector[0]
-		// Or arithmetic distance? "Numerically closest" implies arithmetic.
-		// Let's use arithmetic distance for "numerically closest" as per spec.
+		for i, record := range fm.knowledgeBase {
+			slot0 := record.FeatureVector[0]
+			var d uint32
+			if targetSlot0 > slot0 {
+				d = targetSlot0 - slot0
+			} else {
+				d = slot0 - targetSlot0
+			}
+			if d < minDiff {
+				minDiff = d
+				bestIdx = i
+			}
+		}
+		
+		if bestIdx != -1 {
+			return fm.knowledgeBase[bestIdx].FeatureVector[1]
+		}
+		return currentHash ^ 0xCAFEBABE // Chaos Jitter
+	}
 
-		var d uint32
-		if currentHash > slot0 {
-			d = currentHash - slot0
-		} else {
-			d = slot0 - currentHash
+	// Zone 2: The Grammatical Filter (Passes 8-14)
+	// Focus: Slot 4 (POS) & Slot 10 (Domain)
+	if pass <= 14 {
+		domain := slots[10] & 0xF000
+		pos := slots[4] & 0xFF
+		
+		// Filter neighbors that match Domain and POS
+		var bestIdx int = -1
+		minDiff := ^uint32(0)
+
+		for i, record := range fm.knowledgeBase {
+			// Domain Check
+			if (record.FeatureVector[10] & 0xF000) != domain {
+				continue
+			}
+			// POS Check
+			if (record.FeatureVector[4] & 0xFF) != pos {
+				continue
+			}
+
+			// "Nudges nonces to satisfy POS/Tense requirements."
+			// We look for nearest neighbor on Slot 1 (Subject) or Slot 2 (Action)
+			// Let's use Slot 1 distance to currentHash for "Nudge"
+			recSlot1 := record.FeatureVector[1]
+			var d uint32
+			if currentHash > recSlot1 {
+				d = currentHash - recSlot1
+			} else {
+				d = recSlot1 - currentHash
+			}
+
+			if d < minDiff {
+				minDiff = d
+				bestIdx = i
+			}
 		}
 
-		if d < minDiff {
-			minDiff = d
-			bestIdx = i
+		if bestIdx != -1 {
+			return fm.knowledgeBase[bestIdx].FeatureVector[2] // Return Slot 2 (Action) jitter
+		}
+		return currentHash ^ 0xDEADBEEF // Fallback if no grammatical match
+	}
+
+	// Zone 3: The Specificity Filter (Passes 15-20)
+	// Focus: Slot 3 (Entropy/Fingerprint)
+	// Logic: Stabilizer
+	targetSlot3 := slots[3]
+	
+	// Calculate 'Distance' to the desired entropy fingerprint
+	diff := currentHash ^ targetSlot3
+	
+	// Threshold Check (Leading Zeros)
+	// COHERENCE.md suggests 12 bits
+	zeros := 0
+	for i := 31; i >= 0; i-- {
+		if (diff>>i)&1 == 0 {
+			zeros++
+		} else {
+			break
 		}
 	}
 
-	// 2. Retrieve Slot 1 (Secondary Semantic Feature)
-	jitter := fm.knowledgeBase[bestIdx].FeatureVector[1]
+	if zeros < 12 {
+		// Not close enough. Return high-entropy jitter.
+		return currentHash ^ 0xBADF00D5
+	}
 
-	return jitter
+	// The Stabilizer: deterministic slide
+	return diff ^ 0xFEEDFACE
 }
 
 type BPFDummyInterface struct {

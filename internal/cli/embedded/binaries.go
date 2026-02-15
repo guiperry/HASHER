@@ -40,7 +40,7 @@ var AvailableBinaries = []BinaryInfo{
 		TargetArch:  "amd64",
 	},
 	{
-		Name:        "dataminer",
+		Name:        "data-miner",
 		Description: "Data Miner - Document structuring and PDF processing pipeline",
 		TargetOS:    "linux",
 		TargetArch:  "amd64",

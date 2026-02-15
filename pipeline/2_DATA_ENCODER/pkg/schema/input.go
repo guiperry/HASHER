@@ -17,6 +17,11 @@ type DocumentRecord struct {
 	POSTags      []uint8  `parquet:"name=pos_tags, type=LIST, valuetype=INT32"`
 	Tenses       []uint8  `parquet:"name=tenses, type=LIST, valuetype=INT32"`
 	DepHashes    []uint32 `parquet:"name=dep_hashes, type=LIST, valuetype=INT32"`
+
+	// Alpaca fields
+	Instruction string `parquet:"name=instruction, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Input       string `parquet:"name=input, type=BYTE_ARRAY, convertedtype=UTF8"`
+	Output      string `parquet:"name=output, type=BYTE_ARRAY, convertedtype=UTF8"`
 }
 
 // MinedRecord represents a single record from the Data Miner's output
@@ -24,6 +29,11 @@ type MinedRecord struct {
 	FileName string `json:"file_name"`
 	ChunkID  int    `json:"chunk_id"`
 	Content  string `json:"content"`
+
+	// Alpaca fields (if present)
+	Instruction string `json:"instruction,omitempty"`
+	Input       string `json:"input,omitempty"`
+	Output      string `json:"output,omitempty"`
 
 	// NLP Metadata
 	Tokens       []string `json:"tokens"`

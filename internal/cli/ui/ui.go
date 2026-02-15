@@ -29,7 +29,7 @@ import (
 	"hasher/internal/cli/embedded"
 	"hasher/internal/client"
 	"hasher/internal/config"
-	"hasher/internal/hasher"
+	"hasher/pkg/hashing/validation"
 )
 
 var pipelineState struct {
@@ -235,6 +235,14 @@ var asicConfigMenuItems = []list.Item{
 	},
 }
 
+// PipelineStage defines a single stage in the data pipeline
+type PipelineStage struct {
+	Name    string
+	BinName string
+	Args    []string
+	Desc    string
+}
+
 // Model represents the application state
 type Model struct {
 	CurrentView    int
@@ -277,6 +285,7 @@ type Model struct {
 	PipelineStage    string // Current stage: "miner", "encoder", "trainer", "complete"
 	PipelineProgress float64
 	PipelineLogs     []string
+	PipelineStages   []PipelineStage
 
 	// Log channel for hasher-host output
 	LogChan chan string
@@ -389,6 +398,26 @@ func NewModel() Model {
 		PipelineStage:    "",
 		PipelineProgress: 0,
 		PipelineLogs:     []string{},
+		PipelineStages: []PipelineStage{
+			{
+				Name:    "data-miner",
+				BinName: "data-miner",
+				Args:    []string{"workflow"},
+				Desc:    "Data Miner - Processing documents and PDFs",
+			},
+			{
+				Name:    "data-encoder",
+				BinName: "data-encoder",
+				Args:    []string{"-workers", "2"},
+				Desc:    "Data Encoder - Tokenization and embeddings",
+			},
+			{
+				Name:    "data-trainer",
+				BinName: "data-trainer",
+				Args:    []string{"-verbose", "-epochs", "5", "-sequential"},
+				Desc:    "Data Trainer - Neural network training",
+			},
+		},
 
 		// Log channel for hasher-host output
 		LogChan: make(chan string, 100),
@@ -470,19 +499,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pollPipelineLogsMsg:
 		if m.PipelineRunning {
-			select {
-			case logMsg := <-m.PipelineLogChan:
-				m.PipelineLogs = append(m.PipelineLogs, logMsg.Log)
-				if len(m.PipelineLogs) > 100 {
-					m.PipelineLogs = m.PipelineLogs[len(m.PipelineLogs)-100:]
+			// Drain as many logs as possible in one tick to keep up with fast output
+			drained := 0
+			maxDrain := 20 // Process up to 20 logs per tick to avoid blocking the UI
+			for drained < maxDrain {
+				select {
+				case logMsg := <-m.PipelineLogChan:
+					m.PipelineLogs = append(m.PipelineLogs, logMsg.Log)
+					if len(m.PipelineLogs) > 100 {
+						m.PipelineLogs = m.PipelineLogs[len(m.PipelineLogs)-100:]
+					}
+					if logMsg.Complete {
+						m.PipelineProgress = float64(logMsg.StageIndex+1) / float64(len(m.PipelineStages))
+						binDir, _ := embedded.GetBinDir()
+						nextStage := logMsg.StageIndex + 1
+						if nextStage < len(m.PipelineStages) {
+							cmds = append(cmds, m.runPipelineStage(binDir, nextStage))
+						} else {
+							cmds = append(cmds, func() tea.Msg {
+								return PipelineCompleteMsg{Success: true, Message: "All pipeline stages completed!"}
+							})
+						}
+					}
+					if logMsg.Error {
+						m.PipelineRunning = false
+						drained = maxDrain // Stop draining on error
+					}
+					drained++
+				default:
+					drained = maxDrain // Channel empty
 				}
-				if logMsg.Complete {
-					m.PipelineProgress = float64(logMsg.StageIndex+1) / float64(3)
-				}
-				if logMsg.Error {
-					m.PipelineRunning = false
-				}
-			default:
 			}
 			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 				return pollPipelineLogsMsg{}
@@ -558,7 +604,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.PipelineStage = msg.Stage
 		m.PipelineProgress = msg.Progress
 		if msg.Log != "" {
-			m.PipelineLogs = append(m.PipelineLogs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.Log))
+			m.PipelineLogs = append(m.PipelineLogs, msg.Log)
 			if len(m.PipelineLogs) > 100 {
 				m.PipelineLogs = m.PipelineLogs[len(m.PipelineLogs)-100:]
 			}
@@ -567,24 +613,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Error {
 			m.PipelineRunning = false
 		} else {
-			stages := []struct {
-				name    string
-				binName string
-				args    []string
-				desc    string
-			}{
-				{"data-miner", "dataminer", []string{"workflow"}, "Data Miner - Processing documents and PDFs"},
-				{"data-encoder", "data-encoder", []string{}, "Data Encoder - Tokenization and embeddings"},
-				{"data-trainer", "data-trainer", []string{}, "Data Trainer - Neural network training"},
-			}
-
 			binDir, _ := embedded.GetBinDir()
 			nextStage := msg.StageIndex + 1
-			if nextStage < len(stages) {
+			if nextStage < len(m.PipelineStages) {
 				cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 					return pollPipelineLogsMsg{}
 				}))
-				return m, m.runPipelineStage(binDir, nextStage, stages)
+				return m, m.runPipelineStage(binDir, nextStage)
 			}
 		}
 
@@ -595,7 +630,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.Complete {
-			m.PipelineProgress = float64(msg.StageIndex+1) / float64(3)
+			m.PipelineProgress = float64(msg.StageIndex+1) / float64(len(m.PipelineStages))
+			binDir, _ := embedded.GetBinDir()
+			nextStage := msg.StageIndex + 1
+			if nextStage < len(m.PipelineStages) {
+				cmds = append(cmds, m.runPipelineStage(binDir, nextStage))
+			} else {
+				cmds = append(cmds, func() tea.Msg {
+					return PipelineCompleteMsg{Success: true, Message: "All pipeline stages completed!"}
+				})
+			}
 		}
 		if msg.Error {
 			m.PipelineRunning = false
@@ -1740,12 +1784,12 @@ func (m Model) handleRuleAdd(args []string) tea.Msg {
 	}
 
 	// Create validator and add rule
-	validator, err := hasher.NewLogicalValidator()
+	validator, err := validation.NewLogicalValidator()
 	if err != nil {
 		return AppendChatMsg{Msg: errorStyle.Render(fmt.Sprintf("Error creating validator: %v", err))}
 	}
 
-	rule, err := hasher.NewLogicalRule(ruleType, []string{}, conclusion, "Added via CLI")
+	rule, err := validation.NewLogicalRule(ruleType, []string{}, conclusion, "Added via CLI")
 	if err != nil {
 		return AppendChatMsg{Msg: errorStyle.Render(fmt.Sprintf("Error creating rule: %v", err))}
 	}
@@ -1772,7 +1816,7 @@ func (m Model) handleRuleDelete(args []string) tea.Msg {
 	}
 
 	// Create validator and delete rule
-	validator, err := hasher.NewLogicalValidator()
+	validator, err := validation.NewLogicalValidator()
 	if err != nil {
 		return AppendChatMsg{Msg: errorStyle.Render(fmt.Sprintf("Error creating validator: %v", err))}
 	}
@@ -1786,7 +1830,7 @@ func (m Model) handleRuleDelete(args []string) tea.Msg {
 
 // handleRuleList lists logical rules
 func (m Model) handleRuleList(args []string) tea.Msg {
-	validator, err := hasher.NewLogicalValidator()
+	validator, err := validation.NewLogicalValidator()
 	if err != nil {
 		return AppendChatMsg{Msg: errorStyle.Render(fmt.Sprintf("Error creating validator: %v", err))}
 	}
@@ -2103,7 +2147,7 @@ func (m Model) runRulesManager() tea.Msg {
 		output.WriteString("══════════════════════════════════════\n\n")
 
 		// Create a validator for rule management (independent of orchestrator)
-		validator, err := hasher.NewLogicalValidator()
+		validator, err := validation.NewLogicalValidator()
 		if err != nil {
 			return CombinedLogChatMsg{
 				Log:  fmt.Sprintf("[%s] Error creating validator: %v", time.Now().Format("15:04:05"), err),
@@ -2180,7 +2224,7 @@ func (m Model) runTest() tea.Msg {
 
 func (m Model) runDataPipeline() tea.Cmd {
 	return func() tea.Msg {
-		binDir, err := embedded.GetBinDir()
+		_, err := embedded.GetBinDir()
 		if err != nil {
 			return PipelineCompleteMsg{
 				Success: false,
@@ -2188,75 +2232,89 @@ func (m Model) runDataPipeline() tea.Cmd {
 			}
 		}
 
-		// Return initial progress message instead of using channel
+		// Return initial progress message to trigger the first stage
 		return PipelineProgressMsg{
-			Stage:      "data-pipeline",
+			Stage:      "initializing",
 			Progress:   0,
 			Log:        fmt.Sprintf("[%s] ▶️ Starting data pipeline...", time.Now().Format("15:04:05")),
-			StageIndex: 0,
+			StageIndex: -1, // Will trigger stageIndex 0 in Update
 		}
-
-		return m.runPipelineStage(binDir, 0, []struct {
-			name    string
-			binName string
-			args    []string
-			desc    string
-		}{
-			{"data-miner", "dataminer", []string{"-run-workflow", "-arxiv-enable", "-output", "/home/gperry/.local/share/hasher/data/ai_knowledge_base.json"}, "Data Miner - Processing documents and PDFs"},
-			{"data-encoder", "data-encoder", []string{"-input", "/home/gperry/.local/share/hasher/data/ai_knowledge_base.json", "-workers", "2"}, "Data Encoder - Transform embeddings to Neural Frames"},
-			{"data-trainer", "data-trainer", []string{"-verbose", "-epochs", "5", "-sequential"}, "Data Trainer - Train neural network model"},
-		})
 	}
 }
 
-func (m Model) runPipelineStage(binDir string, stageIndex int, stages []struct {
-	name    string
-	binName string
-	args    []string
-	desc    string
-}) tea.Cmd {
+func (m Model) runPipelineStage(binDir string, stageIndex int) tea.Cmd {
 	return func() tea.Msg {
-		if stageIndex >= len(stages) {
+		if stageIndex >= len(m.PipelineStages) {
 			return PipelineCompleteMsg{
 				Success: true,
 				Message: "Data pipeline completed successfully!",
 			}
 		}
 
-		stage := stages[stageIndex]
-		binaryPath := filepath.Join(binDir, stage.binName)
+		stage := m.PipelineStages[stageIndex]
+		binaryPath := filepath.Join(binDir, stage.BinName)
+
+		// Ensure binary exists and is executable
+		if _, err := os.Stat(binaryPath); err != nil {
+			// Try to find it in embedded if not in binDir
+			var extractErr error
+			binaryPath, extractErr = embedded.GetBinaryPath(stage.BinName)
+			if extractErr != nil {
+				return PipelineLogMsg{
+					Log:        fmt.Sprintf("[%s] ❌ Binary not found: %s (%v)", time.Now().Format("15:04:05"), stage.BinName, extractErr),
+					StageIndex: stageIndex,
+					Error:      true,
+				}
+			}
+		}
 
 		// Create command
 		var cmd *exec.Cmd
-		if len(stage.args) > 0 {
-			cmd = exec.Command(binaryPath, stage.args...)
+		if len(stage.Args) > 0 {
+			cmd = exec.Command(binaryPath, stage.Args...)
 		} else {
 			cmd = exec.Command(binaryPath)
 		}
 		cmd.Dir = binDir
 
-		// Execute command and capture output synchronously for debugging
-		var output bytes.Buffer
-		cmd.Stdout = &output
-		cmd.Stderr = &output
-
-		logMsg := fmt.Sprintf("[%s] 🚀 Running %s with args: %v", time.Now().Format("15:04:05"), stage.name, stage.args)
-
-		err := cmd.Run()
-		outputStr := output.String()
-		if outputStr == "" {
-			outputStr = "No output"
-		}
-
+		// Capture output for streaming
+		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			logMsg += fmt.Sprintf("\n[%s] ❌ Error: %v\n[%s] Output: %s", time.Now().Format("15:04:05"), err, time.Now().Format("15:04:05"), outputStr)
-		} else {
-			logMsg += fmt.Sprintf("\n[%s] ✅ Success\n[%s] Output: %s", time.Now().Format("15:04:05"), time.Now().Format("15:04:05"), outputStr)
+			return PipelineLogMsg{
+				Log:        fmt.Sprintf("[%s] ❌ Failed to create stdout pipe: %v", time.Now().Format("15:04:05"), err),
+				StageIndex: stageIndex,
+				Error:      true,
+			}
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return PipelineLogMsg{
+				Log:        fmt.Sprintf("[%s] ❌ Failed to create stderr pipe: %v", time.Now().Format("15:04:05"), err),
+				StageIndex: stageIndex,
+				Error:      true,
+			}
 		}
 
-		return PipelineProgressMsg{
-			Stage:      stage.name,
-			Progress:   float64(stageIndex+1) / float64(len(stages)),
+		logMsg := fmt.Sprintf("[%s] 🚀 Running %s (%s)...", time.Now().Format("15:04:05"), stage.Name, stage.Desc)
+
+		if err := cmd.Start(); err != nil {
+			return PipelineLogMsg{
+				Log:        fmt.Sprintf("[%s] ❌ Failed to start %s: %v", time.Now().Format("15:04:05"), stage.Name, err),
+				StageIndex: stageIndex,
+				Error:      true,
+			}
+		}
+
+		// Update global pipeline state
+		pipelineState.Mu.Lock()
+		pipelineState.Cmd = cmd
+		pipelineState.Running = true
+		pipelineState.Mu.Unlock()
+
+		// Stream output in a separate goroutine
+		go m.streamPipelineOutput(cmd, stdout, stderr, stageIndex, stage)
+
+		return PipelineLogMsg{
 			Log:        logMsg,
 			StageIndex: stageIndex,
 		}
@@ -2278,15 +2336,16 @@ func (m Model) createTerminalCommand(binaryPath string, args []string, workDir s
 			termEmulator = "x-terminal-emulator"
 		}
 		argStr := strings.Join(args, " ")
-		if termEmulator == "gnome-terminal" || termEmulator == "gnome-terminal-" {
+		switch termEmulator {
+		case "gnome-terminal", "gnome-terminal-":
 			terminalCmd = "gnome-terminal"
 			shellCmd := fmt.Sprintf("cd '%s' && '%s' %s", workDir, binaryPath, argStr)
 			terminalArgs = []string{"--window", "--title", "Hasher Pipeline: " + filepath.Base(binaryPath), "--", "/bin/bash", "-c", shellCmd}
-		} else if termEmulator == "xterm" || termEmulator == "xterm-color" {
+		case "xterm", "xterm-color":
 			terminalCmd = "xterm"
 			shellCmd := fmt.Sprintf("cd '%s' && '%s' %s", workDir, binaryPath, argStr)
 			terminalArgs = []string{"-title", "Hasher Pipeline: " + filepath.Base(binaryPath), "-e", "/bin/bash", "-c", shellCmd}
-		} else {
+		default:
 			terminalCmd = termEmulator
 			shellCmd := fmt.Sprintf("cd '%s' && '%s' %s", workDir, binaryPath, argStr)
 			terminalArgs = []string{"-e", "/bin/bash", "-c", shellCmd}
@@ -2307,78 +2366,54 @@ func (m Model) createTerminalCommand(binaryPath string, args []string, workDir s
 	return cmd
 }
 
-func (m Model) streamPipelineOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr io.ReadCloser, stageIndex int, stages []struct {
-	name    string
-	binName string
-	args    []string
-	desc    string
-}, binDir string, stage struct {
-	name    string
-	binName string
-	args    []string
-	desc    string
-}) {
+func (m Model) streamPipelineOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr io.ReadCloser, stageIndex int, stage PipelineStage) {
 	defer stdout.Close()
 	defer stderr.Close()
 
-	logMsg := fmt.Sprintf("[%s] 📺 Starting output stream for %s...", time.Now().Format("15:04:05"), stage.name)
-	m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
-
 	stdoutScanner := bufio.NewScanner(stdout)
 	go func() {
-		lineCount := 0
 		for stdoutScanner.Scan() {
 			line := strings.TrimSpace(stdoutScanner.Text())
 			if line != "" {
+				// Truncate long lines for UI
 				if len(line) > 150 {
-					line = line[:150] + "..."
+					line = line[:147] + "..."
 				}
 				logMsg := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), line)
 				m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
-				lineCount++
 			}
-		}
-		if lineCount == 0 {
-			logMsg := fmt.Sprintf("[%s] ℹ️ No stdout output from %s", time.Now().Format("15:04:05"), stage.name)
-			m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
 		}
 	}()
 
 	stderrScanner := bufio.NewScanner(stderr)
 	go func() {
-		lineCount := 0
 		for stderrScanner.Scan() {
 			line := strings.TrimSpace(stderrScanner.Text())
 			if line != "" {
+				// Truncate long lines for UI
 				if len(line) > 150 {
-					line = line[:150] + "..."
+					line = line[:147] + "..."
 				}
 				logMsg := fmt.Sprintf("[%s] [stderr] %s", time.Now().Format("15:04:05"), line)
 				m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
-				lineCount++
 			}
-		}
-		if lineCount == 0 {
-			logMsg := fmt.Sprintf("[%s] ℹ️ No stderr output from %s", time.Now().Format("15:04:05"), stage.name)
-			m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
 		}
 	}()
 
 	err := cmd.Wait()
 	pipelineState.Mu.Lock()
+	pipelineState.Running = false
+	pipelineState.Mu.Unlock()
+
 	if err != nil {
-		pipelineState.Running = false
-		pipelineState.Mu.Unlock()
 		m.PipelineLogChan <- PipelineLogMsg{
-			Log:        fmt.Sprintf("[%s] ❌ %s failed: %v", time.Now().Format("15:04:05"), stage.name, err),
+			Log:        fmt.Sprintf("[%s] ❌ %s failed: %v", time.Now().Format("15:04:05"), stage.Name, err),
 			StageIndex: stageIndex,
 			Error:      true,
 		}
 	} else {
-		pipelineState.Running = false
-		pipelineState.Mu.Unlock()
 		m.PipelineLogChan <- PipelineLogMsg{
-			Log:        fmt.Sprintf("[%s] ✅ %s completed", time.Now().Format("15:04:05"), stage.name),
+			Log:        fmt.Sprintf("[%s] ✅ %s completed", time.Now().Format("15:04:05"), stage.Name),
 			StageIndex: stageIndex,
 			Complete:   true,
 		}

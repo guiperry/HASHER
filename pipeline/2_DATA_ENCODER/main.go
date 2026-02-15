@@ -117,11 +117,20 @@ func replaceFileExtension(path, newExt string) string {
 }
 
 func validateConfig(config *Config) error {
+	// If input file is default or doesn't exist, try to auto-detect
+	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) || isDefaultInput(config.InputFile) {
+		detectedFile := AutoDetectInputFile()
+		if detectedFile != "" {
+			config.InputFile = detectedFile
+			log.Printf("🔍 Auto-detected input file: %s", config.InputFile)
+		}
+	}
+
 	// Detect file type
 	fileType := detectFileType(config.InputFile)
 	log.Printf("📁 Input file type: %s (%s)", filepath.Base(config.InputFile), fileType)
 
-	// Check if input file exists
+	// Check if input file exists after detection attempt
 	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
 		return fmt.Errorf("input file does not exist: %s", config.InputFile)
 	}
@@ -143,6 +152,39 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
+// isDefaultInput checks if the provided path is one of our default placeholder paths
+func isDefaultInput(path string) bool {
+	base := filepath.Base(path)
+	return base == "ai_knowledge_base.json"
+}
+
+// AutoDetectInputFile searches for available knowledge base files in priority order:
+// 1. Goat Alpaca (from GOAT dataset)
+// 2. Standard Alpaca (from PDF neural processing)
+// 3. Generic Knowledge Base
+func AutoDetectInputFile() string {
+	homeDir, _ := os.UserHomeDir()
+	jsonDir := filepath.Join(homeDir, ".local", "share", "hasher", "data", "json")
+
+	priorityFiles := []string{
+		"ai_knowledge_base_goat_alpaca.json",
+		"ai_knowledge_base_alpaca.json",
+		"ai_knowledge_base.json",
+		"ai_knowledge_base_goat_alpaca.arrow",
+		"ai_knowledge_base_alpaca.arrow",
+		"ai_knowledge_base.arrow",
+	}
+
+	for _, fileName := range priorityFiles {
+		fullPath := filepath.Join(jsonDir, fileName)
+		if _, err := os.Stat(fullPath); err == nil {
+			return fullPath
+		}
+	}
+
+	return ""
+}
+
 // detectFileType determines if a file is JSON, JSONL, or Arrow based on extension
 func detectFileType(filePath string) string {
 	// Check file extension
@@ -155,26 +197,6 @@ func detectFileType(filePath string) string {
 	}
 
 	return "json" // Default to JSON
-}
-
-// detectInputFile determines the appropriate input file based on priority:
-// 1. JSON file (primary)
-// 2. Legacy JSON file (fallback)
-// detectInputFile determines the appropriate input file based on priority:
-// 1. JSON file (primary)
-// 2. Legacy JSON file (fallback)
-func detectInputFile(defaultJSONPath, legacyJSONPath string) (string, string, error) {
-	// Priority 1: Check if default JSON file exists
-	if _, err := os.Stat(defaultJSONPath); err == nil {
-		return defaultJSONPath, "json", nil
-	}
-
-	// Priority 2: Check for legacy JSON location
-	if _, err := os.Stat(legacyJSONPath); err == nil {
-		return legacyJSONPath, "json (legacy)", nil
-	}
-
-	return "", "", fmt.Errorf("no JSON input file found in any location")
 }
 
 // performVarianceAnalysis samples documents to identify high-variance BGE dimensions
@@ -537,6 +559,9 @@ func processDocumentRecords(records []schema.DocumentRecord, tp *mapper.TensorPa
 			FileName:     record.FileName,
 			ChunkID:      int(record.ChunkID),
 			Content:      record.Content,
+			Instruction:  record.Instruction,
+			Input:        record.Input,
+			Output:       record.Output,
 			Tokens:       record.Tokens,
 			TokenOffsets: record.TokenOffsets,
 			POSTags:      record.POSTags,
@@ -788,29 +813,45 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 
 		// 6. Process each window in the batch
 		log.Printf("[PROCESS] Step 6/6: Writing %d frames to JSON array...", len(batch))
+		
+		// Maintain a rolling XOR history for memory slots (6-8)
+		// We use a simple 3-uint32 state that we XOR with each new header
+		memoryState := [3]uint32{0x5F3759DF, 0x12345678, 0x87654321} // Initial seeds
+
 		for i, window := range batch {
 			// Find corresponding SpaCy metadata for the target token
-			// We use the character offset of the target token to find the match
-			targetTokenIdx := window.EndPos // In our SlidingWindow, EndPos is the target token index
+			targetTokenIdx := window.EndPos
 			targetOffset := int32(tokenStartOffsets[targetTokenIdx])
 
 			var pos uint8 = 0
 			var tense uint8 = 0
 			var depHash uint32 = 0
 
-			// Simple search for the SpaCy token that covers this character offset
+			// More robust search: find the SpaCy token that most closely matches or contains this offset
+			bestMatchIdx := -1
+			minDiff := int32(1000000)
+
 			for j, spacyOffset := range record.TokenOffsets {
-				if spacyOffset == targetOffset {
-					pos = record.POSTags[j]
-					tense = record.Tenses[j]
-					depHash = record.DepHashes[j]
+				diff := spacyOffset - targetOffset
+				if diff < 0 { diff = -diff }
+				
+				if diff < minDiff {
+					minDiff = diff
+					bestMatchIdx = j
+				}
+				
+				// Perfect match found
+				if diff == 0 {
 					break
 				}
 			}
 
-			// Temporal Memory XOR logic (Slots 6-8) - placeholder for now
-			// In a full implementation, we would keep a rolling buffer of previous headers
-			memoryBuffer := make([]uint32, 3)
+			// If we found a reasonably close match (within 2 characters), use its metadata
+			if bestMatchIdx != -1 && minDiff <= 2 {
+				pos = record.POSTags[bestMatchIdx]
+				tense = record.Tenses[bestMatchIdx]
+				depHash = record.DepHashes[bestMatchIdx]
+			}
 
 			// Pack the frame into the 12-slot specification
 			asicSlots := tp.PackFrame(
@@ -818,9 +859,16 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 				pos,
 				tense,
 				depHash,
-				memoryBuffer,
+				memoryState[:],
 				uint16(targetTokenIdx),
+				record.Instruction,
+				record.Input,
 			)
+
+			// Update memory state for next window (XOR with current slots 0-2)
+			memoryState[0] ^= asicSlots[0]
+			memoryState[1] ^= asicSlots[1]
+			memoryState[2] ^= asicSlots[2]
 
 			// Create training frame
 			frame := schema.TrainingFrame{
