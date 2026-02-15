@@ -5,12 +5,15 @@ go 1.23
 toolchain go1.24.1
 
 require (
+	github.com/am-sokolov/go-spacy v0.0.0-20250919212123-1d3a142ac336
+	github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40
 	github.com/vbauerster/mpb/v8 v8.7.4
 	go.etcd.io/bbolt v1.4.0
 )
 
+replace github.com/am-sokolov/go-spacy => ./spacy
+
 require (
-	github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40 // indirect
 	github.com/golang/snappy v0.0.3 // indirect
 	github.com/google/flatbuffers v2.0.0+incompatible // indirect
 	github.com/klauspost/compress v1.13.1 // indirect

@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # Main Go-Spacy service
+  go-spacy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        GO_VERSION: 1.21.5
+    image: go-spacy:latest
+    container_name: go-spacy-main
+    restart: unless-stopped
+    environment:
+      - LD_LIBRARY_PATH=/app/lib
+      - PYTHONPATH=/usr/local/lib/python3.10/site-packages
+    volumes:
+      - ./examples:/app/examples:ro
+      - ./testdata:/app/testdata:ro
+    healthcheck:
+      test: ["/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - go-spacy-network
+
+  # Development environment
+  go-spacy-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      args:
+        GO_VERSION: 1.21.5
+    image: go-spacy:dev
+    container_name: go-spacy-dev
+    profiles:
+      - dev
+    environment:
+      - CGO_ENABLED=1
+      - LD_LIBRARY_PATH=/workspace/lib
+    volumes:
+      - .:/workspace
+      - go-spacy-cache:/go/pkg/mod
+      - go-spacy-build-cache:/root/.cache/go-build
+    working_dir: /workspace
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    networks:
+      - go-spacy-network
+
+  # Example web service using Go-Spacy
+  nlp-api:
+    build:
+      context: .
+      dockerfile: examples/api-service/Dockerfile
+    image: go-spacy-api:latest
+    container_name: go-spacy-api
+    profiles:
+      - api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - SPACY_MODEL=en_core_web_sm
+      - LOG_LEVEL=info
+      - LD_LIBRARY_PATH=/app/lib
+    depends_on:
+      - go-spacy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - go-spacy-network
+
+  # Benchmarking service
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: go-spacy:latest
+    container_name: go-spacy-benchmark
+    profiles:
+      - bench
+    environment:
+      - LD_LIBRARY_PATH=/app/lib
+    volumes:
+      - ./benchmark-results:/app/results
+      - .:/workspace:ro
+    working_dir: /workspace
+    command: >
+      bash -c "
+        export LD_LIBRARY_PATH=/app/lib &&
+        go test -bench=. -benchmem -run=^$$ ./... | tee /app/results/benchmark-$(date +%Y%m%d-%H%M%S).txt
+      "
+    networks:
+      - go-spacy-network
+
+  # Testing service with multiple language models
+  multilang-test:
+    build:
+      context: .
+      dockerfile: examples/multilang/Dockerfile
+    image: go-spacy-multilang:latest
+    container_name: go-spacy-multilang
+    profiles:
+      - multilang
+    environment:
+      - LD_LIBRARY_PATH=/app/lib
+    volumes:
+      - .:/workspace:ro
+      - ./test-results:/app/results
+    working_dir: /workspace
+    command: >
+      bash -c "
+        export LD_LIBRARY_PATH=/app/lib &&
+        go test -v -run TestMultiLanguage ./... | tee /app/results/multilang-$(date +%Y%m%d-%H%M%S).log
+      "
+    networks:
+      - go-spacy-network
+
+volumes:
+  go-spacy-cache:
+    driver: local
+  go-spacy-build-cache:
+    driver: local
+
+networks:
+  go-spacy-network:
+    driver: bridge
+    name: go-spacy-net

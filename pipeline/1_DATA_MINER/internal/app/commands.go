@@ -23,6 +23,7 @@ var ScriptCommands = map[string]func() error{
 	"deps":          CheckDependencies,
 	"clean":         CleanProject,
 	"kill":          KillDataminer,
+	"kill-servers":  KillServers,
 }
 
 // RunScriptCommand executes a script command based on the provided name
@@ -375,5 +376,34 @@ func killDataminerFallback() error {
 	}
 
 	fmt.Println("✅ Done")
+	return nil
+}
+
+// KillServers kills all running opencode and ollama processes
+func KillServers() error {
+	fmt.Println("🛑 Killing all opencode and ollama processes...")
+
+	// Get the project root to find the kill script
+	projectRoot, err := getProjectRoot()
+	if err != nil {
+		projectRoot = "."
+	}
+
+	killScript := filepath.Join(projectRoot, "scripts", "kill_servers.sh")
+
+	// Check if the script exists
+	if _, err := os.Stat(killScript); os.IsNotExist(err) {
+		return fmt.Errorf("kill script not found at %s", killScript)
+	}
+
+	// Run the kill script
+	cmd := exec.Command("bash", killScript)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run kill script: %w", err)
+	}
+
 	return nil
 }

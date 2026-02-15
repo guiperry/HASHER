@@ -87,7 +87,7 @@ func RunHybridMode() error {
 func PrintModeInfo(mode string) {
 	switch mode {
 	case "production":
-		fmt.Println("🏭 Production Mode: Full workflow with optimal defaults for production deployment")
+		fmt.Println("🏭 Production Mode: Full workflow with GOAT dataset as default source")
 	case "test":
 		fmt.Println("🧪 Test Mode: Limited scope for testing functionality")
 	case "optimized":
@@ -97,9 +97,9 @@ func PrintModeInfo(mode string) {
 	case "neural":
 		fmt.Println("🧠 Neural Mode: Neural processing of existing PDFs only")
 	case "arxiv":
-		fmt.Println("📚 ArXiv Mode: ArXiv mining only")
+		fmt.Println("📚 ArXiv Mode: ArXiv mining and PDF processing")
 	case "workflow":
-		fmt.Println("🔄 Workflow Mode: Integrated arXiv + neural processing")
+		fmt.Println("🔄 Workflow Mode: Integrated processing")
 	default:
 		fmt.Println("🔧 Default Mode: Standard neural processing")
 	}

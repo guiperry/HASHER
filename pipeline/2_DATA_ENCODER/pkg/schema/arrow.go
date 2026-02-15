@@ -9,6 +9,135 @@ import (
 	"github.com/apache/arrow/go/arrow/memory"
 )
 
+// GetDocumentRecordArrowSchema returns the Arrow schema for DocumentRecord
+func GetDocumentRecordArrowSchema() *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "file_name", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "chunk_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "content", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "embedding", Type: arrow.ListOf(arrow.PrimitiveTypes.Float32), Nullable: false},
+		{Name: "tokens", Type: arrow.ListOf(arrow.BinaryTypes.String), Nullable: false},
+		{Name: "token_offsets", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32), Nullable: false},
+		{Name: "pos_tags", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
+		{Name: "tenses", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint8), Nullable: false},
+		{Name: "dep_hashes", Type: arrow.ListOf(arrow.PrimitiveTypes.Uint32), Nullable: false},
+	}, nil)
+}
+
+// ReadDocumentRecordsFromArrowIPC reads DocumentRecords from an Arrow IPC stream file
+func ReadDocumentRecordsFromArrowIPC(filePath string) ([]DocumentRecord, error) {
+	// Open file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Create Arrow reader
+	r, err := ipc.NewReader(file)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Release()
+
+	var records []DocumentRecord
+
+	// Read all batches
+	for r.Next() {
+		batch := r.Record()
+		docs, err := arrowBatchToDocumentRecords(batch)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, docs...)
+	}
+
+	if err := r.Err(); err != nil {
+		return nil, err
+	}
+
+	return records, nil
+}
+
+// arrowBatchToDocumentRecords converts Arrow Record to DocumentRecords
+func arrowBatchToDocumentRecords(batch array.Record) ([]DocumentRecord, error) {
+	var records []DocumentRecord
+
+	// Get columns
+	fileNameCol := batch.Column(0).(*array.String)
+	chunkIDCol := batch.Column(1).(*array.Int32)
+	contentCol := batch.Column(2).(*array.String)
+	embeddingCol := batch.Column(3).(*array.List)
+	tokensCol := batch.Column(4).(*array.List)
+	tokenOffsetsCol := batch.Column(5).(*array.List)
+	posTagsCol := batch.Column(6).(*array.List)
+	tensesCol := batch.Column(7).(*array.List)
+	depHashesCol := batch.Column(8).(*array.List)
+
+	// Convert each row
+	for i := 0; i < int(batch.NumRows()); i++ {
+		// Get embedding values
+		embeddingOffset := embeddingCol.Offsets()[i]
+		embeddingLength := embeddingCol.Offsets()[i+1] - embeddingOffset
+		embeddingValues := embeddingCol.ListValues().(*array.Float32).Float32Values()
+		embeddingSlice := embeddingValues[embeddingOffset:embeddingOffset+embeddingLength]
+
+		embeddingCopy := make([]float32, len(embeddingSlice))
+		copy(embeddingCopy, embeddingSlice)
+
+		// Get tokens
+		tokensOffset := tokensCol.Offsets()[i]
+		tokensLength := tokensCol.Offsets()[i+1] - tokensOffset
+		tokensValues := tokensCol.ListValues().(*array.String)
+		tokensSlice := make([]string, tokensLength)
+		for j := 0; j < int(tokensLength); j++ {
+			tokensSlice[j] = tokensValues.Value(int(tokensOffset) + j)
+		}
+
+		// Get token_offsets
+		tokenOffsetsOffset := tokenOffsetsCol.Offsets()[i]
+		tokenOffsetsLength := tokenOffsetsCol.Offsets()[i+1] - tokenOffsetsOffset
+		tokenOffsetsValues := tokenOffsetsCol.ListValues().(*array.Int32).Int32Values()
+		tokenOffsetsSlice := make([]int32, tokenOffsetsLength)
+		copy(tokenOffsetsSlice, tokenOffsetsValues[tokenOffsetsOffset:tokenOffsetsOffset+tokenOffsetsLength])
+
+		// Get pos_tags
+		posTagsOffset := posTagsCol.Offsets()[i]
+		posTagsLength := posTagsCol.Offsets()[i+1] - posTagsOffset
+		posTagsValues := posTagsCol.ListValues().(*array.Uint8).Uint8Values()
+		posTagsSlice := make([]uint8, posTagsLength)
+		copy(posTagsSlice, posTagsValues[posTagsOffset:posTagsOffset+posTagsLength])
+
+		// Get tenses
+		tensesOffset := tensesCol.Offsets()[i]
+		tensesLength := tensesCol.Offsets()[i+1] - tensesOffset
+		tensesValues := tensesCol.ListValues().(*array.Uint8).Uint8Values()
+		tensesSlice := make([]uint8, tensesLength)
+		copy(tensesSlice, tensesValues[tensesOffset:tensesOffset+tensesLength])
+
+		// Get dep_hashes
+		depHashesOffset := depHashesCol.Offsets()[i]
+		depHashesLength := depHashesCol.Offsets()[i+1] - depHashesOffset
+		depHashesValues := depHashesCol.ListValues().(*array.Uint32).Uint32Values()
+		depHashesSlice := make([]uint32, depHashesLength)
+		copy(depHashesSlice, depHashesValues[depHashesOffset:depHashesOffset+depHashesLength])
+
+		records = append(records, DocumentRecord{
+			FileName:     fileNameCol.Value(i),
+			ChunkID:      chunkIDCol.Value(i),
+			Content:      contentCol.Value(i),
+			Embedding:    embeddingCopy,
+			Tokens:       tokensSlice,
+			TokenOffsets: tokenOffsetsSlice,
+			POSTags:      posTagsSlice,
+			Tenses:       tensesSlice,
+			DepHashes:    depHashesSlice,
+		})
+	}
+
+	return records, nil
+}
+
 // GetMinedRecordArrowSchema returns the Arrow schema for MinedRecord
 func GetMinedRecordArrowSchema() *arrow.Schema {
 	return arrow.NewSchema([]arrow.Field{

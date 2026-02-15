@@ -8,15 +8,25 @@ VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS=-ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
+# Spacy configuration
+SPACY_LIB_DIR=$(shell pwd)/spacy/lib
+export LD_LIBRARY_PATH:=$(SPACY_LIB_DIR):$(LD_LIBRARY_PATH)
+
 # Default target
 .PHONY: all
 all: clean build
 
 # Build the binary
 .PHONY: build
-build:
+build: 
 	@echo "Building $(BINARY_NAME)..."
 	go build $(LDFLAGS) -o bin/$(BINARY_NAME) $(MAIN_PACKAGE)
+
+# Build the spacy C++ library
+.PHONY: spacy-lib
+spacy-lib:
+	@echo "Building spacy C++ library..."
+	cd spacy && go run build.go
 
 # Build for current platform only
 .PHONY: build-local

@@ -18,89 +18,25 @@ import (
 // CheckOrStartOllama checks if Ollama is running and starts it if necessary
 func CheckOrStartOllama(host, model string) error {
 	// First check if Ollama is running
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	url := fmt.Sprintf("%s/api/tags", host)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Ollama check request: %w", err)
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		// Ollama is running, test embeddings endpoint
-		resp.Body.Close()
-
-		// Test embeddings endpoint with more patient timeout
-		embedCtx, embedCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer embedCancel()
-
-		embedURL := fmt.Sprintf("%s/api/embeddings", host)
-		embedReq := embedder.OllamaEmbeddingRequest{
-			Model:  model,
-			Prompt: "test embedding generation check",
-		}
-
-		jsonData, _ := json.Marshal(embedReq)
-		embedHttpReq, err := http.NewRequestWithContext(embedCtx, "POST", embedURL, bytes.NewBuffer(jsonData))
-		if err != nil {
-			return fmt.Errorf("failed to test embeddings endpoint: %w", err)
-		}
-		embedHttpReq.Header.Set("Content-Type", "application/json")
-
-		embedClient := &http.Client{Timeout: 25 * time.Second}
-		resp2, err := embedClient.Do(embedHttpReq)
-		if err != nil {
-			return fmt.Errorf("failed to test embeddings endpoint: %w", err)
-		}
-		defer resp2.Body.Close()
-
-		if resp2.StatusCode != http.StatusOK {
-			return fmt.Errorf("embeddings endpoint returned status %d", resp2.StatusCode)
-		}
-
+	if isOllamaRunning(host) {
 		return nil
 	}
 
 	// If we get here, Ollama is not running, try to start it
 	fmt.Printf("🚀 Ollama not running at %s, attempting to start...\n", host)
 
-	// Try to start Ollama using go-ollama equivalent (direct command)
+	// Try to start Ollama using direct command
 	cmd := exec.Command("ollama", "serve")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 
-	err = cmd.Start()
+	err := cmd.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start Ollama: %w", err)
 	}
 
-	// Give Ollama a moment to start
-	time.Sleep(3 * time.Second)
-
-	// Check again if it's running now
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-
-	req2, err := http.NewRequestWithContext(ctx2, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create second Ollama check request: %w", err)
-	}
-
-	resp2, err := client.Do(req2)
-	if err != nil {
-		return fmt.Errorf("failed to check Ollama after starting: %w", err)
-	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
-		return fmt.Errorf("Ollama failed to start properly")
-	}
-
-	fmt.Printf("✅ Ollama started successfully at %s\n", host)
-	return nil
+	// Give Ollama a moment to start and be ready
+	return WaitForOllama(host, 30*time.Second)
 }
 
 // ConfigureOllamaEnvironment sets up optimal environment variables for Ollama
@@ -138,22 +74,9 @@ func ConfigureOllamaEnvironment(gpuOptimizations bool, gpuOverride bool, numWork
 func WaitForOllama(host string, timeout time.Duration) error {
 	start := time.Now()
 	for time.Since(start) < timeout {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, "GET", host+"/api/tags", nil)
-		cancel()
-
-		if err == nil {
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Do(req)
-			if err == nil && resp.StatusCode == http.StatusOK {
-				resp.Body.Close()
-				return nil
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
+		if isOllamaRunning(host) {
+			return nil
 		}
-
 		time.Sleep(1 * time.Second)
 	}
 
@@ -165,55 +88,21 @@ func StartOllamaWithOptimizations(host string, gpuOptimizations bool, gpuOverrid
 	// Configure environment variables
 	ConfigureOllamaEnvironment(gpuOptimizations, gpuOverride, numWorkers)
 
-	// Check if Ollama is already running
-	if isOllamaRunning(host) {
-		log.Println("✅ Ollama is already running")
-		return nil
-	}
-
-	// Start Ollama if not running
-	log.Println("🚀 Starting Ollama with optimizations...")
-	cmd := exec.Command("ollama", "serve")
-
-	// Create log file for Ollama output
-	logFile, err := os.Create("/tmp/ollama_start.log")
-	if err != nil {
-		log.Printf("Warning: Could not create log file: %v", err)
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-	} else {
-		defer logFile.Close()
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-	}
-
-	err = cmd.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start Ollama: %w", err)
-	}
-
-	// Wait for Ollama to be ready
-	log.Println("⏳ Waiting for Ollama to be ready...")
-	err = WaitForOllama(host, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("Ollama failed to start: %w (check /tmp/ollama_start.log for details)", err)
-	}
-
-	log.Printf("✅ Ollama started successfully at %s", host)
-	return nil
+	return CheckOrStartOllama(host, "")
 }
 
 // isOllamaRunning checks if Ollama is currently running
 func isOllamaRunning(host string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", host+"/api/tags", nil)
+	url := fmt.Sprintf("%s/api/tags", host)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
@@ -223,39 +112,71 @@ func isOllamaRunning(host string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// GetOllamaModel checks if a specific model is available in Ollama
-func GetOllamaModel(host, model string) (bool, error) {
+// GetOllamaModels returns a list of all models available in Ollama
+func GetOllamaModels(host string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", host+"/api/tags", nil)
+	url := fmt.Sprintf("%s/api/tags", host)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("Ollama API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("Ollama API returned status %d", resp.StatusCode)
 	}
 
-	var tagsResponse struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
+	// The API can return either {"models": [...]} or just [...]
+	var body interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&tagsResponse); err != nil {
+	var modelNames []string
+	
+	// Handle map format {"models": [...]}
+	if m, ok := body.(map[string]interface{}); ok {
+		if models, ok := m["models"].([]interface{}); ok {
+			for _, model := range models {
+				if modelMap, ok := model.(map[string]interface{}); ok {
+					if name, ok := modelMap["name"].(string); ok {
+						modelNames = append(modelNames, name)
+					}
+				}
+			}
+		}
+	} else if models, ok := body.([]interface{}); ok {
+		// Handle array format [...]
+		for _, model := range models {
+			if modelMap, ok := model.(map[string]interface{}); ok {
+				if name, ok := modelMap["name"].(string); ok {
+					modelNames = append(modelNames, name)
+				}
+			}
+		}
+	}
+
+	return modelNames, nil
+}
+
+// GetOllamaModel checks if a specific model is available in Ollama
+func GetOllamaModel(host, model string) (bool, error) {
+	models, err := GetOllamaModels(host)
+	if err != nil {
 		return false, err
 	}
 
-	for _, m := range tagsResponse.Models {
-		if strings.HasPrefix(m.Name, model) {
+	for _, m := range models {
+		// Check for exact match or prefix (e.g. "llama3" matches "llama3:latest")
+		if m == model || strings.HasPrefix(m, model+":") || (model == "llama3" && strings.HasPrefix(m, "llama3")) {
 			return true, nil
 		}
 	}
@@ -286,6 +207,178 @@ func PullOllamaModel(host, model string) error {
 
 	log.Printf("✅ Successfully pulled model %s", model)
 	return nil
+}
+
+// GenerateAlpacaRecord transforms a text chunk into an Alpaca-styled record using prioritized providers:
+// 1. OpenCode (via opencode run)
+// 2. Ollama (if running)
+// 3. SpaCy (deterministic extraction)
+func GenerateAlpacaRecord(ctx context.Context, host, model, text string, nlpBridge *NLPBridge) (*AlpacaRecord, error) {
+	// Try OpenCode first as it's the prioritized primary provider
+	record, err := GenerateAlpacaRecordOpenCode(ctx, text)
+	if err == nil {
+		return record, nil
+	}
+	log.Printf("⚠️  OpenCode Alpaca generation failed: %v. Trying Ollama...", err)
+
+	// Try Ollama second
+	record, err = GenerateAlpacaRecordOllama(ctx, host, model, text)
+	if err == nil {
+		return record, nil
+	}
+	log.Printf("⚠️  Ollama Alpaca generation failed: %v. Falling back to deterministic SpaCy...", err)
+
+	// Fallback to deterministic SpaCy
+	return GenerateAlpacaRecordSpaCy(text, nlpBridge)
+}
+
+// GenerateAlpacaRecordOllama transforms a text chunk using Ollama
+func GenerateAlpacaRecordOllama(ctx context.Context, host, model, text string) (*AlpacaRecord, error) {
+	prompt := fmt.Sprintf(`Transform the following text into a single Alpaca-styled instruction record. 
+The record must have "instruction", "input", and "output" fields.
+- "instruction": A task or question derived from the text.
+- "input": The relevant context or supporting information from the text.
+- "output": The answer or completion based on the text.
+
+Respond ONLY with a valid JSON object.
+
+Text:
+%s`, text)
+
+	request := struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+		Format string `json:"format"`
+		Stream bool   `json:"stream"`
+	}{
+		Model:  model,
+		Prompt: prompt,
+		Format: "json",
+		Stream: false,
+	}
+
+	jsonData, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/generate", host)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Ollama returned status %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Response string `json:"response"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	var record AlpacaRecord
+	if err := json.Unmarshal([]byte(response.Response), &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal alpaca record: %w. Response: %s", err, response.Response)
+	}
+
+	return &record, nil
+}
+
+// GenerateAlpacaRecordOpenCode transforms a text chunk using the opencode run command
+func GenerateAlpacaRecordOpenCode(ctx context.Context, text string) (*AlpacaRecord, error) {
+	prompt := fmt.Sprintf(`Transform the following text into a single Alpaca-styled instruction record. 
+The record must have "instruction", "input", and "output" fields.
+- "instruction": A task or question derived from the text.
+- "input": The relevant context or supporting information from the text.
+- "output": The answer or completion based on the text.
+
+Respond ONLY with a valid JSON object.
+
+Text:
+%s`, text)
+
+	// Use opencode run command
+	cmd := exec.CommandContext(ctx, "opencode", "run", prompt)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("opencode run failed: %w (output: %s)", err, string(output))
+	}
+
+	// Filter out status lines like "> build · big-pickle"
+	lines := strings.Split(string(output), "\n")
+	var jsonStr string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || jsonStr != "" {
+			jsonStr += line
+		}
+	}
+
+	// Try to extract JSON if there's other text
+	start := strings.Index(jsonStr, "{")
+	end := strings.LastIndex(jsonStr, "}")
+	if start == -1 || end == -1 || end < start {
+		return nil, fmt.Errorf("failed to find JSON in opencode output: %s", jsonStr)
+	}
+	jsonStr = jsonStr[start : end+1]
+
+	var record AlpacaRecord
+	if err := json.Unmarshal([]byte(jsonStr), &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal opencode alpaca record: %w. Output: %s", err, jsonStr)
+	}
+
+	return &record, nil
+}
+
+// GenerateAlpacaRecordSpaCy creates a deterministic Alpaca record using NLP features
+func GenerateAlpacaRecordSpaCy(text string, nlpBridge *NLPBridge) (*AlpacaRecord, error) {
+	if nlpBridge == nil {
+		return &AlpacaRecord{
+			Instruction: "Analyze the provided text fragment.",
+			Input:       text,
+			Output:      "The text contains information about linguistic patterns.",
+		}, nil
+	}
+
+	// Deterministic extraction
+	tokens, _, posTags, _, _ := nlpBridge.ProcessText(text)
+	
+	// Count nouns and verbs
+	var nouns, verbs []string
+	for i, token := range tokens {
+		if posTags[i] == 0x01 { // NOUN
+			nouns = append(nouns, token)
+		} else if posTags[i] == 0x02 { // VERB
+			verbs = append(verbs, token)
+		}
+	}
+
+	instruction := "Analyze this text fragment and identify key concepts."
+	if len(verbs) > 0 {
+		instruction = fmt.Sprintf("Analyze the action described by: %s", strings.Join(verbs[:min(3, len(verbs))], ", "))
+	}
+
+	output := "The text fragment discusses several concepts."
+	if len(nouns) > 0 {
+		output = fmt.Sprintf("Key concepts identified include: %s.", strings.Join(nouns[:min(5, len(nouns))], ", "))
+	}
+
+	return &AlpacaRecord{
+		Instruction: instruction,
+		Input:       text,
+		Output:      output,
+	}, nil
 }
 
 // TestEmbeddingsEndpoint tests the embeddings endpoint with a sample request
@@ -322,4 +415,22 @@ func TestEmbeddingsEndpoint(host, model string) error {
 	}
 
 	return nil
+}
+
+// IsOpenCodeRunning checks if the OpenCode server is responsive on port 5500
+func IsOpenCodeRunning() bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://localhost:5500")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

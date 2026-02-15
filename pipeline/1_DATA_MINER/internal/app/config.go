@@ -74,6 +74,7 @@ func ParseFlags() *Config {
 		ChunkSize:    150,
 		ChunkOverlap: 25,
 		OllamaModel:  "nomic-embed-text",
+		OllamaGenModel: "llama3",
 		OllamaHost:   "http://localhost:11434",
 		CheckpointDB: filepath.Join(dirs["checkpoints"], "checkpoints.db"),
 		BatchSize:    numWorkers,
@@ -108,6 +109,7 @@ func ParseFlags() *Config {
 	flag.IntVar(&config.ChunkSize, "chunk-size", config.ChunkSize, "Words per chunk")
 	flag.IntVar(&config.ChunkOverlap, "chunk-overlap", config.ChunkOverlap, "Words overlap between chunks")
 	flag.StringVar(&config.OllamaModel, "model", config.OllamaModel, "Ollama embedding model")
+	flag.StringVar(&config.OllamaGenModel, "gen-model", config.OllamaGenModel, "Ollama generation model (for Alpaca)")
 	flag.StringVar(&config.OllamaHost, "host", config.OllamaHost, "Ollama API host")
 	flag.StringVar(&config.CheckpointDB, "checkpoint", config.CheckpointDB, "Checkpoint database file")
 	flag.IntVar(&config.BatchSize, "batch-size", config.BatchSize, "Batch size for embeddings")
@@ -131,6 +133,7 @@ func ParseFlags() *Config {
 	flag.BoolVar(&config.OptimizedMode, "optimized", config.OptimizedMode, "Run with CPU optimizations")
 	flag.BoolVar(&config.HybridMode, "hybrid", config.HybridMode, "Run with hybrid embeddings")
 	flag.BoolVar(&config.NoArxivMode, "no-arxiv", config.NoArxivMode, "Skip arXiv mining")
+	flag.BoolVar(&config.GoatMode, "goat", config.GoatMode, "Use GOAT dataset from Hugging Face instead of arXiv")
 	flag.BoolVar(&config.DryRun, "dry-run", config.DryRun, "Show configuration without running")
 
 	// Environment configuration
@@ -187,7 +190,7 @@ func detectScriptMode() string {
 func applyScriptConfiguration(config *Config, mode string) {
 	switch mode {
 	case "production":
-		// Production workflow configuration
+		// Production workflow configuration - GOAT dataset is now the default source
 		if config.NumWorkers == 8 { // default
 			if runtime.GOOS != "windows" {
 				if cmd := exec.Command("nproc"); cmd != nil {
@@ -203,9 +206,8 @@ func applyScriptConfiguration(config *Config, mode string) {
 		}
 		config.ChunkSize = 150
 		config.ChunkOverlap = 25
-		config.EnableArxivMining = true
-		config.ArxivMaxPapers = 50
-		config.ArxivDownloadDelay = 2
+		config.GoatMode = true
+		config.EnableArxivMining = false // Disable arXiv by default in favor of GOAT
 
 	case "test":
 		// Test workflow configuration
@@ -343,6 +345,8 @@ func PrintConfiguration(config *Config) {
 		fmt.Printf("    📄 Max Papers: %d\n", config.ArxivMaxPapers)
 		fmt.Printf("    ⏱️  Delay: %ds\n", config.ArxivDownloadDelay)
 		fmt.Printf("    🔄 Background Mode: %t\n", config.ArxivBackgroundMode)
+	} else if config.GoatMode {
+		fmt.Printf("    🐐 GOAT Dataset: Enabled (Hugging Face)\n")
 	} else {
 		fmt.Printf("    ❌ Disabled\n")
 	}

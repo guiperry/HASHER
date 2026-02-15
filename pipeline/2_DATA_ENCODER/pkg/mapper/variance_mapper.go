@@ -66,23 +66,6 @@ func (v *VarianceMapper) MapToSlots(embedding []float32) [12]uint32 {
 	return slots
 }
 
-// quantizeFloatToUint16 converts a float32 in range [-1.0, 1.0] to uint16 [0, 65535]
-func quantizeFloatToUint16(val float32) uint16 {
-	// Clamp to valid range
-	if val < -1.0 {
-		val = -1.0
-	}
-	if val > 1.0 {
-		val = 1.0
-	}
-
-	// Scale from [-1.0, 1.0] to [0, 65535]
-	// Formula: (val + 1.0) / 2.0 * 65535
-	scaled := (val + 1.0) / 2.0 * 65535.0
-
-	return uint16(scaled + 0.5) // Round to nearest
-}
-
 // MapToSlotsRaw provides raw uint32 values for direct hardware access
 // Returns slots as-is without the high-signal filtering
 func MapToSlotsRaw(embedding []float32) [12]uint32 {

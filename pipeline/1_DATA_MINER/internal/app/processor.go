@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,6 +170,14 @@ func embeddingWorker(id int, jobs <-chan string, results chan<- DocumentRecord, 
 	ollamaURL := strings.TrimSuffix(config.OllamaHost, "/") + "/api/embeddings"
 	provider := embedder.NewHybridEmbeddingProvider(config.CloudflareEndpoint, ollamaURL, config.OllamaModel, config.CloudflareLimit)
 
+	// Initialize NLP Bridge
+	nlpBridge, err := NewNLPBridge()
+	if err != nil {
+		log.Printf("Worker %d failed to initialize NLP Bridge: %v", id, err)
+	} else {
+		defer nlpBridge.Close()
+	}
+
 	for path := range jobs {
 		log.Printf("Worker %d processing: %s", id, path)
 
@@ -218,11 +227,26 @@ func embeddingWorker(id int, jobs <-chan string, results chan<- DocumentRecord, 
 
 			// Create DocumentRecord for each chunk
 			for j, chunk := range batch {
+				var tokens []string
+				var offsets []int32
+				var posTags []uint8
+				var tenses []uint8
+				var depHashes []uint32
+
+				if nlpBridge != nil {
+					tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(chunk)
+				}
+
 				record := DocumentRecord{
-					FileName:  path,
-					ChunkID:   int32(i + j),
-					Content:   chunk,
-					Embedding: embeddings[j],
+					FileName:     path,
+					ChunkID:      int32(i + j),
+					Content:      chunk,
+					Embedding:    embeddings[j],
+					Tokens:       tokens,
+					TokenOffsets: offsets,
+					POSTags:      posTags,
+					Tenses:       tenses,
+					DepHashes:    depHashes,
 				}
 				allRecords = append(allRecords, record)
 				results <- record // Also send to main output
@@ -322,6 +346,42 @@ func ChunkText(text string, chunkSize, overlap int) []string {
 	return chunks
 }
 
+// ChunkTextByParagraph splits text into paragraphs or sentences
+func ChunkTextByParagraph(text string) []string {
+	// First split by double newlines for paragraphs
+	paragraphs := strings.Split(text, "\n\n")
+	var chunks []string
+
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		// If a paragraph is too long, we could further split it by sentences,
+		// but for now let's just use paragraphs as the base unit.
+		if len(strings.Fields(p)) < 5 {
+			continue // Skip very short fragments
+		}
+
+		chunks = append(chunks, p)
+	}
+
+	// If we didn't find many paragraphs, try single newlines
+	if len(chunks) < 5 {
+		lines := strings.Split(text, "\n")
+		chunks = nil
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if len(strings.Fields(l)) > 10 {
+				chunks = append(chunks, l)
+			}
+		}
+	}
+
+	return chunks
+}
+
 // getBatchEmbeddings generates embeddings for a batch of text chunks
 func getBatchEmbeddings(provider *embedder.HybridEmbeddingProvider, texts []string) ([][]float32, error) {
 	// Get provider stats
@@ -367,28 +427,29 @@ func writeJSONOutputFromSlice(path string, records []DocumentRecord) error {
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-
 	first := true
-	if _, err := file.WriteString("[\n"); err != nil {
+	if _, err := file.WriteString("["); err != nil {
 		return err
 	}
 
 	for _, record := range records {
 		if !first {
-			if _, err := file.WriteString(",\n"); err != nil {
+			if _, err := file.WriteString(","); err != nil {
 				return err
 			}
 		}
 		first = false
 
-		if err := encoder.Encode(record); err != nil {
+		recordBytes, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(recordBytes); err != nil {
 			return err
 		}
 	}
 
-	if _, err := file.WriteString("\n]"); err != nil {
+	if _, err := file.WriteString("]"); err != nil {
 		return err
 	}
 
@@ -414,28 +475,29 @@ func writeJSONOutput(path string, results <-chan DocumentRecord) error {
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-
 	first := true
-	if _, err := file.WriteString("[\n"); err != nil {
+	if _, err := file.WriteString("["); err != nil {
 		return err
 	}
 
 	for record := range results {
 		if !first {
-			if _, err := file.WriteString(",\n"); err != nil {
+			if _, err := file.WriteString(","); err != nil {
 				return err
 			}
 		}
 		first = false
 
-		if err := encoder.Encode(record); err != nil {
+		recordBytes, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(recordBytes); err != nil {
 			return err
 		}
 	}
 
-	if _, err := file.WriteString("\n]"); err != nil {
+	if _, err := file.WriteString("]"); err != nil {
 		return err
 	}
 
@@ -500,13 +562,76 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 	fmt.Printf("🔄 Starting Continuous Workflow\n")
 	fmt.Printf("================================\n")
 
-	// Only start Ollama if Cloudflare is not configured
-	if config.CloudflareEndpoint == "" {
-		fmt.Println("⚠️  No Cloudflare endpoint configured, checking Ollama...")
-		if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
-			return fmt.Errorf("failed to start Ollama: %w", err)
+	// 1. Ensure Ollama is running (for both embeddings and generation)
+	if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
+		fmt.Printf("⚠️  Warning: Failed to ensure Ollama is running: %v\n", err)
+	}
+
+	// 2. Try to start OpenCode server as a secondary provider
+	fmt.Println("🚀 Ensuring OpenCode server is running on port 5500...")
+	if !IsOpenCodeRunning() {
+		go func() {
+			exec.Command("opencode", "serve", "--port", "5500").Start()
+		}()
+		// Give it a moment to start
+		time.Sleep(2 * time.Second)
+	} else {
+		fmt.Println("✅ OpenCode server is already running")
+	}
+
+	// 3. Smart model selection for Ollama (Embedding)
+	hasEmbedModel, _ := GetOllamaModel(config.OllamaHost, config.OllamaModel)
+	if !hasEmbedModel {
+		fmt.Printf("📥 Embedding model %s not found. Pulling...\n", config.OllamaModel)
+		if err := PullOllamaModel(config.OllamaHost, config.OllamaModel); err != nil {
+			fmt.Printf("⚠️  Warning: Failed to pull embedding model %s: %v\n", config.OllamaModel, err)
 		}
 	} else {
+		fmt.Printf("✅ Embedding model %s is ready\n", config.OllamaModel)
+	}
+
+	// 4. Smart model selection for Ollama (Generation)
+	fmt.Printf("🤖 Checking Ollama generation model: %s...\n", config.OllamaGenModel)
+	hasGenModel, err := GetOllamaModel(config.OllamaHost, config.OllamaGenModel)
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Failed to check Ollama models: %v\n", err)
+	}
+
+	if !hasGenModel {
+		fmt.Printf("ℹ️  Model %s not found. Checking for ANY available model...\n", config.OllamaGenModel)
+		availableModels, _ := GetOllamaModels(config.OllamaHost)
+		if len(availableModels) > 0 {
+			// Find a good fallback
+			foundFallback := false
+			for _, m := range availableModels {
+				// Prioritize llama, mistral, or any non-embedding model
+				if !strings.Contains(strings.ToLower(m), "embed") {
+					fmt.Printf("✅ Found fallback model: %s. Using it for generation.\n", m)
+					config.OllamaGenModel = m
+					foundFallback = true
+					break
+				}
+			}
+			if !foundFallback {
+				config.OllamaGenModel = availableModels[0]
+				fmt.Printf("✅ Using first available model: %s\n", config.OllamaGenModel)
+			}
+		} else {
+			// No models at all, must pull if opencode isn't running
+			if !IsOpenCodeRunning() {
+				fmt.Printf("📥 No models found in Ollama and OpenCode not running. Pulling %s...\n", config.OllamaGenModel)
+				if err := PullOllamaModel(config.OllamaHost, config.OllamaGenModel); err != nil {
+					fmt.Printf("❌ Failed to pull model %s: %v\n", config.OllamaGenModel, err)
+				}
+			} else {
+				fmt.Printf("ℹ️  No models in Ollama, but OpenCode is running. Will use OpenCode for generation.\n")
+			}
+		}
+	} else {
+		fmt.Printf("✅ Ollama generation model %s is ready\n", config.OllamaGenModel)
+	}
+
+	if config.CloudflareEndpoint != "" {
 		fmt.Printf("☁️  Using Cloudflare embeddings: %s\n", config.CloudflareEndpoint)
 	}
 
@@ -606,8 +731,33 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 			return handleQuotaExhausted(config, statsManager, provider, maxDaily)
 		}
 
-		// Initialize counters for this iteration
 		var papersDownloaded, papersProcessed, embeddingsGenerated int
+
+		// PHASE 0: GOAT Mining (Hugging Face)
+		if config.GoatMode {
+			fmt.Printf("\n🐐 PHASE 0: GOAT Mining (Hugging Face)\n")
+			fmt.Printf("========================================\n")
+			
+			papersProcessed, embeddingsGenerated, err = RunGoatMiningPhase(ctx, config, provider, statsManager)
+			if err != nil {
+				return fmt.Errorf("GOAT mining phase failed: %w", err)
+			}
+
+			// Record in stats manager
+			statsManager.RecordWorkflowLoop(0, papersProcessed, embeddingsGenerated)
+			statsManager.Save()
+
+			fmt.Printf("\n🎉 GOAT PHASE COMPLETED\n")
+			fmt.Printf("======================\n")
+			fmt.Printf("🐐 Records processed: %d\n", papersProcessed)
+			fmt.Printf("📈 Embeddings generated: %d\n", embeddingsGenerated)
+			
+			// In GOAT mode, we might want to exit after one successful run if not continuous
+			if !config.EnableArxivMining {
+				fmt.Println("🏁 GOAT mode completed. Exiting workflow.")
+				return nil
+			}
+		}
 
 		// First, check if we have existing papers to process
 		fmt.Printf("🔍 Step 1: Scanning for existing papers...\n")
@@ -951,7 +1101,15 @@ func runArxivMiningPhase(config *Config, _ *SessionStats, maxPapers int) (int, e
 }
 
 func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *embedder.HybridEmbeddingProvider, sessionStats *SessionStats, statsManager *StatsManager) (int, int, error) {
-	fmt.Printf("🔄 Starting neural processing phase...\n")
+	fmt.Printf("🔄 Starting neural processing phase with Alpaca transformation...\n")
+
+	// Initialize NLP Bridge
+	nlpBridge, err := NewNLPBridge()
+	if err != nil {
+		fmt.Printf("⚠️  Failed to initialize NLP Bridge: %v\n", err)
+	} else {
+		defer nlpBridge.Close()
+	}
 
 	// Initialize checkpoint system
 	checkpointer, err := checkpoint.NewCheckpointer(config.CheckpointDB)
@@ -973,28 +1131,13 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 
 	fmt.Printf("📄 Found %d PDF files to process\n", len(files))
 
-	// Process all available files
-	maxFilesToProcess := len(files)
-	fmt.Printf("📊 Processing all %d available files\n", maxFilesToProcess)
-
-	// Estimate embeddings needed and limit papers if necessary
-	maxEmbeddings := sessionStats.CloudflareRemaining
-	if maxEmbeddings <= 0 {
-		maxEmbeddings = 100 // fallback
-	}
-
-	maxPapers := maxEmbeddings / 50
-	if len(files) > maxPapers {
-		fmt.Printf("📊 Limiting processing to %d papers due to quota constraints\n", maxPapers)
-		files = files[:maxPapers]
-	}
-
-	// Create JSON output file
-	fmt.Printf("📝 Creating JSON output: %s\n", config.OutputFile)
-	if err := os.MkdirAll(filepath.Dir(config.OutputFile), 0755); err != nil {
+	// Create JSON output file for all results (as requested, not splitting by paper)
+	alpacaJsonPath := strings.TrimSuffix(config.OutputFile, ".json") + "_alpaca.json"
+	fmt.Printf("📝 Creating Alpaca JSON output: %s\n", alpacaJsonPath)
+	if err := os.MkdirAll(filepath.Dir(alpacaJsonPath), 0755); err != nil {
 		return 0, 0, fmt.Errorf("failed to create json directory: %w", err)
 	}
-	jsonFile, err := os.Create(config.OutputFile)
+	jsonFile, err := os.Create(alpacaJsonPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to create json file: %w", err)
 	}
@@ -1005,6 +1148,7 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 		return 0, 0, fmt.Errorf("failed to write JSON opening: %w", err)
 	}
 
+	var allAlpacaRecords []AlpacaDocumentRecord
 	totalEmbeddingsGenerated := 0
 	papersProcessed := 0
 	firstRecord := true
@@ -1031,9 +1175,14 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 
 		fmt.Printf("✅ Successfully extracted %d characters from %s\n", len(text), filepath.Base(file))
 
-		chunks := ChunkText(text, config.ChunkSize, config.ChunkOverlap)
+		chunks := ChunkTextByParagraph(text)
 		if len(chunks) == 0 {
-			fmt.Printf("⚠️  No chunks generated from %s\n", filepath.Base(file))
+			fmt.Printf("⚠️  No paragraphs found in %s, falling back to standard chunking\n", filepath.Base(file))
+			chunks = ChunkText(text, config.ChunkSize, config.ChunkOverlap)
+		}
+
+		if len(chunks) == 0 {
+			fmt.Printf("⚠️  Still no chunks generated from %s\n", filepath.Base(file))
 			continue
 		}
 
@@ -1046,13 +1195,34 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 			select {
 			case <-ctx.Done():
 				fmt.Printf("\n🛑 Processing cancelled by user during chunk processing\n")
-				// Note: stats will be saved by the calling function
 				return papersProcessed, totalEmbeddingsGenerated, ctx.Err()
 			default:
 			}
 
 			fmt.Printf("🔧 Processing chunk %d/%d (length: %d)...\n", j+1, len(chunks), len(chunk))
 
+			// 1. Transform to Alpaca record
+			fmt.Printf("🤖 Transforming to Alpaca record using %s...\n", config.OllamaGenModel)
+			alpaca, err := GenerateAlpacaRecord(ctx, config.OllamaHost, config.OllamaGenModel, chunk, nlpBridge)
+			if err != nil {
+				fmt.Printf("❌ Failed to generate Alpaca record for chunk %d: %v\n", j+1, err)
+				continue
+			}
+
+			// 2. Extract NLP metadata
+			var tokens []string
+			var offsets []int32
+			var posTags []uint8
+			var tenses []uint8
+			var depHashes []uint32
+			if nlpBridge != nil {
+				tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(chunk)
+			}
+
+			// 3. Get embedding for the Alpaca record
+			// We embed Instruction + Input + Output to capture the full semantic meaning
+			embedText := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+			
 			// Check if we have quota left
 			providerStats := provider.GetProviderStats()
 			var remaining int
@@ -1062,19 +1232,18 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 				remaining = remainingInt
 			}
 
-			if remaining <= 0 {
-				fmt.Printf("⚠️  Quota exhausted, stopping processing\n")
-				break
+			if remaining <= 0 && config.CloudflareEndpoint != "" {
+				fmt.Printf("⚠️  Cloudflare quota exhausted, falling back to Ollama or stopping\n")
 			}
 
-			fmt.Printf("🌐 Getting embedding for chunk %d...\n", j+1)
+			fmt.Printf("🌐 Getting embedding for Alpaca record %d...\n", j+1)
 
 			// Add timeout for embedding generation
 			embeddingChan := make(chan []float32, 1)
 			errChan := make(chan error, 1)
 
 			go func() {
-				embedding, err := provider.GetEmbedding(chunk)
+				embedding, err := provider.GetEmbedding(embedText)
 				if err != nil {
 					errChan <- err
 				} else {
@@ -1087,7 +1256,7 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 			select {
 			case emb := <-embeddingChan:
 				embedding = emb
-				fmt.Printf("✅ Generated embedding for chunk %d (length: %d)\n", j+1, len(embedding))
+				fmt.Printf("✅ Generated embedding for chunk %d\n", j+1)
 				fileEmbeddings++
 
 				// Sync quota to stats manager after each successful embedding
@@ -1097,36 +1266,41 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 				fmt.Printf("❌ Failed to generate embedding for chunk %d: %v\n", j+1, err)
 				continue // Skip chunks that fail
 			case <-ctx.Done():
-				fmt.Printf("\n🛑 Embedding generation cancelled by user\n")
-				// Note: stats will be saved by the calling function
 				return papersProcessed, totalEmbeddingsGenerated, ctx.Err()
 			case <-time.After(60 * time.Second):
 				fmt.Printf("⏰ TIMEOUT: Failed to generate embedding for chunk %d after 60 seconds\n", j+1)
-				continue // Skip chunks that timeout
+				continue
 			}
 
-			// Write record to JSON backup
+			// 4. Create record and write to JSON backup
 			if !firstRecord {
-				if _, err := jsonFile.WriteString(",\n"); err != nil {
+				if _, err := jsonFile.WriteString(","); err != nil {
 					fmt.Printf("⚠️  Failed to write JSON separator: %v\n", err)
 					continue
 				}
 			}
 
-			// Create JSON record
-			jsonRecord := fmt.Sprintf(`{
-    "file_name": "%s",
-    "chunk_id": %d,
-    "content": %s,
-    "embedding": [%s]
-  }`,
-				file,
-				j,
-				fmt.Sprintf("%q", chunk),
-				formatEmbeddingArray(embedding),
-			)
+			alpacaRecord := AlpacaDocumentRecord{
+				AlpacaRecord: *alpaca,
+				FileName:     file,
+				ChunkID:      int32(j),
+				Embedding:    embedding,
+				Tokens:       tokens,
+				TokenOffsets: offsets,
+				POSTags:      posTags,
+				Tenses:       tenses,
+				DepHashes:    depHashes,
+			}
+			
+			allAlpacaRecords = append(allAlpacaRecords, alpacaRecord)
 
-			if _, err := jsonFile.WriteString(jsonRecord); err != nil {
+			recordBytes, err := json.MarshalIndent(alpacaRecord, "  ", "  ")
+			if err != nil {
+				fmt.Printf("⚠️  Failed to marshal JSON record: %v\n", err)
+				continue
+			}
+
+			if _, err := jsonFile.Write(recordBytes); err != nil {
 				fmt.Printf("⚠️  Failed to write JSON record: %v\n", err)
 				continue
 			}
@@ -1137,7 +1311,7 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 		totalEmbeddingsGenerated += fileEmbeddings
 		papersProcessed++
 
-		fmt.Printf("✅ Completed file %s: %d embeddings generated and saved\n", filepath.Base(file), fileEmbeddings)
+		fmt.Printf("✅ Completed file %s: %d Alpaca records generated\n", filepath.Base(file), fileEmbeddings)
 
 		// Mark file as processed
 		if err := checkpointer.MarkAsDone(file); err != nil {
@@ -1152,13 +1326,12 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 		} else if remainingInt, ok := currentProviderStats["remaining_quota"].(int); ok {
 			remaining = remainingInt
 		}
-		if remaining <= 0 {
+		if remaining <= 0 && config.CloudflareEndpoint != "" {
 			fmt.Printf("⚠️  Quota exhausted after processing %d papers\n", papersProcessed)
 			break
 		}
 
-		// Brief pause between files to prevent overwhelming
-		fmt.Printf("⏳ Pausing 1 second before next file...\n")
+		// Brief pause between files
 		time.Sleep(1 * time.Second)
 	}
 
@@ -1167,8 +1340,14 @@ func runNeuralProcessingPhase(ctx context.Context, config *Config, provider *emb
 		return 0, 0, fmt.Errorf("failed to write JSON closing: %w", err)
 	}
 
-	fmt.Printf("🎉 Neural processing phase completed: %d papers, %d embeddings\n", papersProcessed, totalEmbeddingsGenerated)
-	fmt.Printf("  📄 JSON Output: %s\n", config.OutputFile)
+	// 5. Write to Arrow output
+	arrowPath := strings.TrimSuffix(config.OutputFile, ".json") + "_alpaca.arrow"
+	fmt.Printf("📝 Writing Alpaca Arrow IPC output: %s\n", arrowPath)
+	if err := WriteAlpacaDocumentRecordsToArrowIPC(arrowPath, allAlpacaRecords); err != nil {
+		fmt.Printf("❌ Failed to write Arrow IPC output: %v\n", err)
+	}
+
+	fmt.Printf("🎉 Neural processing phase completed: %d papers, %d Alpaca records\n", papersProcessed, totalEmbeddingsGenerated)
 	return papersProcessed, totalEmbeddingsGenerated, nil
 }
 
@@ -1267,9 +1446,151 @@ func printDetailedStats(statsManager *StatsManager, maxDaily int) {
 	fmt.Printf("================================\n")
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// RunGoatMiningPhase fetches the GOAT dataset from Hugging Face and processes it
+func RunGoatMiningPhase(ctx context.Context, config *Config, provider *embedder.HybridEmbeddingProvider, statsManager *StatsManager) (int, int, error) {
+	fmt.Printf("🐐 Starting GOAT Mining Phase (Hugging Face)\n")
+	fmt.Printf("===========================================\n")
+
+	// Initialize NLP Bridge
+	nlpBridge, err := NewNLPBridge()
+	if err != nil {
+		fmt.Printf("⚠️  Failed to initialize NLP Bridge: %v\n", err)
+	} else {
+		defer nlpBridge.Close()
 	}
-	return b
+
+	// Hugging Face Datasets Server API URL
+	offset := 0
+	length := 100
+	
+	hfURL := fmt.Sprintf("https://datasets-server.huggingface.co/rows?dataset=stallone%%2Fgoat&config=completion&split=train&offset=%d&length=%d", offset, length)
+	
+	fmt.Printf("🌐 Fetching GOAT dataset from: %s\n", hfURL)
+	
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(hfURL)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to fetch GOAT dataset: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, fmt.Errorf("Hugging Face API returned status %d", resp.StatusCode)
+	}
+
+	var hfResponse struct {
+		Rows []struct {
+			Row struct {
+				Input  string `json:"input"`
+				Output string `json:"output"`
+				DocID  string `json:"doc_id"`
+			} `json:"row"`
+		} `json:"rows"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&hfResponse); err != nil {
+		return 0, 0, fmt.Errorf("failed to decode GOAT response: %w", err)
+	}
+
+	fmt.Printf("📊 Received %d rows from GOAT dataset\n", len(hfResponse.Rows))
+
+	// Create JSON output file
+	alpacaJsonPath := strings.TrimSuffix(config.OutputFile, ".json") + "_goat_alpaca.json"
+	fmt.Printf("📝 Creating GOAT Alpaca JSON output: %s\n", alpacaJsonPath)
+	if err := os.MkdirAll(filepath.Dir(alpacaJsonPath), 0755); err != nil {
+		return 0, 0, fmt.Errorf("failed to create json directory: %w", err)
+	}
+	
+	jsonFile, err := os.Create(alpacaJsonPath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to create json file: %w", err)
+	}
+	defer jsonFile.Close()
+
+	jsonFile.WriteString("[\n")
+
+	var allAlpacaRecords []AlpacaDocumentRecord
+	totalEmbeddingsGenerated := 0
+	recordsProcessed := 0
+	firstRecord := true
+
+	for i, hfRow := range hfResponse.Rows {
+		select {
+		case <-ctx.Done():
+			return recordsProcessed, totalEmbeddingsGenerated, ctx.Err()
+		default:
+		}
+
+		row := hfRow.Row
+		fmt.Printf("🔢 Processing record %d/%d (ID: %s)\n", i+1, len(hfResponse.Rows), row.DocID)
+
+		// Map to Alpaca structure
+		alpaca := &AlpacaRecord{
+			Instruction: "Solve the following arithmetic problem.",
+			Input:       row.Input,
+			Output:      row.Output,
+		}
+
+		// Extract NLP metadata
+		var tokens []string
+		var offsets []int32
+		var posTags []uint8
+		var tenses []uint8
+		var depHashes []uint32
+		if nlpBridge != nil {
+			tokens, offsets, posTags, tenses, depHashes = nlpBridge.ProcessText(row.Input)
+		}
+
+		// Get embedding
+		embedText := fmt.Sprintf("Instruction: %s\nInput: %s\nOutput: %s", alpaca.Instruction, alpaca.Input, alpaca.Output)
+		
+		fmt.Printf("🌐 Getting embedding for record %d...\n", i+1)
+		embedding, err := provider.GetEmbedding(embedText)
+		if err != nil {
+			fmt.Printf("❌ Failed to generate embedding for record %d: %v\n", i+1, err)
+			continue
+		}
+
+		// Create full record
+		alpacaRecord := AlpacaDocumentRecord{
+			AlpacaRecord: *alpaca,
+			FileName:     fmt.Sprintf("hf://stallone/goat/%s", row.DocID),
+			ChunkID:      int32(i),
+			Embedding:    embedding,
+			Tokens:       tokens,
+			TokenOffsets: offsets,
+			POSTags:      posTags,
+			Tenses:       tenses,
+			DepHashes:    depHashes,
+		}
+
+		allAlpacaRecords = append(allAlpacaRecords, alpacaRecord)
+
+		// Write to JSON
+		if !firstRecord {
+			jsonFile.WriteString(",")
+		}
+		recordBytes, _ := json.MarshalIndent(alpacaRecord, "  ", "  ")
+		jsonFile.Write(recordBytes)
+		firstRecord = false
+
+		totalEmbeddingsGenerated++
+		recordsProcessed++
+
+		// Sync quota
+		used, max, _ := provider.RequestTracker.GetStats()
+		statsManager.RecordCloudflareUsage(used, max)
+	}
+
+	jsonFile.WriteString("\n]")
+	
+	// Write to Arrow
+	arrowPath := strings.TrimSuffix(config.OutputFile, ".json") + "_goat_alpaca.arrow"
+	fmt.Printf("📝 Writing GOAT Alpaca Arrow IPC output: %s\n", arrowPath)
+	if err := WriteAlpacaDocumentRecordsToArrowIPC(arrowPath, allAlpacaRecords); err != nil {
+		fmt.Printf("❌ Failed to write Arrow IPC output: %v\n", err)
+	}
+
+	fmt.Printf("🎉 GOAT Mining completed: %d records processed\n", recordsProcessed)
+	return recordsProcessed, totalEmbeddingsGenerated, nil
 }

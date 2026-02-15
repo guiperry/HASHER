@@ -16,7 +16,8 @@ GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
 # Build flags
-LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)"
+SPACY_LIB_DIR := $(CURDIR)/spacy/lib
+LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT) -extldflags '-Wl,-rpath,$(SPACY_LIB_DIR)'"
 BUILD_FLAGS := -trimpath -buildmode=pie $(LDFLAGS)
 
 # Version information
@@ -48,15 +49,18 @@ help:
 	@echo "  install      Install binary to system"
 	@echo "  uninstall    Remove binary from system"
 	@echo "  run          Run with default configuration"
-	@echo "  run-prod     Run in production mode"
+	@echo "  run-prod     Run in production mode (GOAT dataset default)"
 	@echo "  run-test     Run in test mode"
 	@echo "  run-opt      Run in optimized mode"
 	@echo "  run-hybrid   Run in hybrid mode"
+	@echo "  run-goat     Run specifically for GOAT dataset retrieval"
+	@echo "  run-arxiv    Run specifically for arXiv mining"
 	@echo "  run-workflow Run integrated workflow"
 	@echo "  dev          Development build and run"
 	@echo "  debug        Debug mode with dry-run"
 	@echo "  monitor     Production mode with monitoring"
 	@echo "  status       Show project status"
+	@echo "  kill-servers Kill all opencode and ollama processes"
 	@echo "  release      Create release build"
 	@echo "  docker       Build Docker image"
 	@echo "  docs         Generate documentation"
@@ -97,7 +101,7 @@ deps:
 
 # Build targets
 .PHONY: build
-build: 
+build: spacy-lib
 	@echo "🔨 Building $(BINARY_NAME)..."
 	@mkdir -p $(BIN_DIR)
 	go build $(BUILD_FLAGS) -o $(BIN_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
@@ -178,6 +182,13 @@ lint:
 		golangci-lint run; \
 	fi
 
+
+# Build the spacy C++ library
+.PHONY: spacy-lib
+spacy-lib:
+	@echo "Building spacy C++ library..."
+	cd spacy && go run build.go
+	
 # Installation targets
 .PHONY: install
 install: build
@@ -195,78 +206,88 @@ uninstall:
 .PHONY: run
 run: build
 	@echo "🚀 Running Data Miner with default configuration..."
-	$(BIN_DIR)/$(BINARY_NAME) run
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) run
 
 .PHONY: run-prod
 run-prod: build
 	@echo "🚀 Running Data Miner in production mode..."
-	$(BIN_DIR)/$(BINARY_NAME) production
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) production
 
 .PHONY: run-test
 run-test: build
 	@echo "🧪 Running Data Miner in test mode..."
-	$(BIN_DIR)/$(BINARY_NAME) test
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) test
 
 .PHONY: run-opt
 run-opt: build
 	@echo "⚡ Running Data Miner in optimized mode..."
-	$(BIN_DIR)/$(BINARY_NAME) optimized
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) optimized
 
 .PHONY: run-hybrid
 run-hybrid: build
 	@echo "🔄 Running Data Miner in hybrid mode..."
-	$(BIN_DIR)/$(BINARY_NAME) hybrid
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) hybrid
+
+.PHONY: run-goat
+run-goat: build
+	@echo "🐐 Running Data Miner with GOAT dataset..."
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) -goat
+
+.PHONY: run-arxiv
+run-arxiv: build
+	@echo "📚 Running Data Miner with arXiv mining..."
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) -arxiv-enable
 
 .PHONY: run-workflow
 run-workflow: build
 	@echo "🔄 Running Data Miner in workflow mode (arXiv + neural)..."
-	$(BIN_DIR)/$(BINARY_NAME) -arxiv-enable -production
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) -arxiv-enable -production
 
 .PHONY: run-arxiv-only
 run-arxiv-only: build
 	@echo "📚 Running Data Miner in arXiv-only mode..."
-	$(BIN_DIR)/$(BINARY_NAME) -arxiv-enable
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) -arxiv-enable
 
 # Application command targets (using script commands)
 .PHONY: app-run-workflow
 app-run-workflow: build
 	@echo "🏭 Running production workflow command..."
-	$(BIN_DIR)/$(BINARY_NAME) run-workflow
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) run-workflow
 
 .PHONY: app-test-workflow
 app-test-workflow: build
 	@echo "🧪 Running test workflow command..."
-	$(BIN_DIR)/$(BINARY_NAME) test-workflow
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) test-workflow
 
 .PHONY: app-run-optimized
 app-run-optimized: build
 	@echo "⚡ Running optimized workflow command..."
-	$(BIN_DIR)/$(BINARY_NAME) run-optimized
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) run-optimized
 
 .PHONY: app-run-hybrid
 app-run-hybrid: build
 	@echo "🔄 Running hybrid workflow command..."
-	$(BIN_DIR)/$(BINARY_NAME) run-hybrid
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) run-hybrid
 
 .PHONY: app-help
 app-help: build
 	@echo "📖 Showing application help..."
-	$(BIN_DIR)/$(BINARY_NAME) help
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) help
 
 .PHONY: list-modes
 list-modes: build
 	@echo "📋 Listing available modes..."
-	$(BIN_DIR)/$(BINARY_NAME) list-modes
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) list-modes
 
 .PHONY: check-deps
 check-deps: build
 	@echo "🔍 Checking dependencies..."
-	$(BIN_DIR)/$(BINARY_NAME) deps
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) deps
 
 .PHONY: app-clean
 app-clean: build
 	@echo "🧹 Cleaning application artifacts..."
-	$(BIN_DIR)/$(BINARY_NAME) clean
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) clean
 
 # Custom run with parameters
 .PHONY: run-custom
@@ -277,7 +298,7 @@ run-custom: build
 		exit 1; \
 	fi
 	@echo "🚀 Running Data Miner with custom configuration..."
-	$(BIN_DIR)/$(BINARY_NAME) -input "$(INPUT)" -output "$(OUTPUT)"
+	LD_LIBRARY_PATH=$(SPACY_LIB_DIR) $(BIN_DIR)/$(BINARY_NAME) -input "$(INPUT)" -output "$(OUTPUT)"
 
 # Release build
 .PHONY: release
@@ -385,6 +406,11 @@ status:
 		echo "📄 PDFs: $$(find data -name '*.pdf' 2>/dev/null | wc -l)"; \
 		echo "📄 JSON files: $$(find data -name '*.json' 2>/dev/null | wc -l)"; \
 	fi
+
+.PHONY: kill-servers
+kill-servers:
+	@echo "🛑 Killing background servers..."
+	./scripts/kill_servers.sh
 
 # Quick development shortcuts
 .PHONY: q

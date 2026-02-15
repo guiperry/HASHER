@@ -1,0 +1,94 @@
+{
+  "documents": [
+    {
+      "id": "news_article",
+      "text": "Washington, D.C. - President Joe Biden announced a new $1.2 trillion infrastructure bill on Monday, March 15, 2024. The legislation, supported by both Democrats and Republicans, aims to modernize America's aging roads, bridges, and public transit systems. Secretary of Transportation Pete Buttigieg stated that the investment would create approximately 2 million jobs over the next decade. The bill passed the Senate with a 67-33 vote and is expected to clear the House of Representatives by Friday.",
+      "expected_entities": ["Joe Biden", "Washington, D.C.", "$1.2 trillion", "Monday, March 15, 2024", "Democrats", "Republicans", "America", "Pete Buttigieg", "2 million", "Senate", "House of Representatives", "Friday"],
+      "expected_sentences": 4
+    },
+    {
+      "id": "scientific_abstract",
+      "text": "Recent advances in quantum computing have demonstrated the potential for exponential speedup in solving certain computational problems. Researchers at MIT and IBM have successfully implemented a 127-qubit processor capable of maintaining quantum coherence for up to 100 microseconds. The breakthrough, published in Nature Physics on January 10, 2024, represents a significant step toward practical quantum supremacy. Dr. Sarah Chen, lead researcher on the project, suggests that commercial applications could emerge within 5-10 years.",
+      "expected_entities": ["MIT", "IBM", "127-qubit", "100 microseconds", "Nature Physics", "January 10, 2024", "Sarah Chen", "5-10 years"],
+      "expected_sentences": 4
+    },
+    {
+      "id": "financial_report",
+      "text": "Apple Inc. reported record-breaking quarterly earnings of $123.9 billion, exceeding analyst expectations by 8.5%. CEO Tim Cook attributed the success to strong iPhone 15 sales in China and India. The Cupertino-based tech giant saw its stock price surge 12% in after-hours trading, reaching an all-time high of $195.42 per share. Competitors Microsoft and Google also posted strong results, with the NASDAQ index climbing 2.3% on Thursday.",
+      "expected_entities": ["Apple Inc.", "$123.9 billion", "8.5%", "Tim Cook", "iPhone 15", "China", "India", "Cupertino", "12%", "$195.42", "Microsoft", "Google", "NASDAQ", "2.3%", "Thursday"],
+      "expected_sentences": 4
+    },
+    {
+      "id": "medical_text",
+      "text": "The patient, a 45-year-old male, presented with acute chest pain lasting 3 hours. Initial ECG showed ST-segment elevation in leads V1-V4, consistent with anterior myocardial infarction. Troponin levels were elevated at 2.5 ng/mL (normal <0.04 ng/mL). Emergency percutaneous coronary intervention was performed, revealing 95% occlusion of the left anterior descending artery. Post-procedure, the patient was started on dual antiplatelet therapy with aspirin 81mg and clopidogrel 75mg daily.",
+      "expected_entities": ["45-year-old", "3 hours", "V1-V4", "2.5 ng/mL", "0.04 ng/mL", "95%", "81mg", "75mg"],
+      "expected_sentences": 5
+    },
+    {
+      "id": "legal_document",
+      "text": "Pursuant to Section 7.2(a) of the Agreement dated December 1, 2023, between Acme Corporation ('Buyer') and TechStart Inc. ('Seller'), the total purchase price of $50,000,000 shall be paid as follows: (i) $20,000,000 upon closing, (ii) $15,000,000 within 90 days of closing, and (iii) the remaining $15,000,000 in quarterly installments over 24 months. The Agreement is governed by the laws of Delaware and any disputes shall be resolved through binding arbitration in New York City.",
+      "expected_entities": ["Section 7.2(a)", "December 1, 2023", "Acme Corporation", "TechStart Inc.", "$50,000,000", "$20,000,000", "$15,000,000", "90 days", "24 months", "Delaware", "New York City"],
+      "expected_sentences": 2
+    }
+  ],
+  "edge_cases": [
+    {
+      "id": "empty_string",
+      "text": "",
+      "expected_tokens": 0
+    },
+    {
+      "id": "single_word",
+      "text": "Hello",
+      "expected_tokens": 1
+    },
+    {
+      "id": "only_punctuation",
+      "text": "...!!!???",
+      "expected_min_tokens": 1
+    },
+    {
+      "id": "unicode_text",
+      "text": "Emoji test 😀🎉 with Chinese 中文 and Arabic العربية",
+      "expected_min_tokens": 5
+    },
+    {
+      "id": "malformed_sentences",
+      "text": "This sentence has no period And this one has no capital. but this one is oddly formatted",
+      "expected_min_sentences": 1
+    },
+    {
+      "id": "nested_quotes",
+      "text": "She said, \"He told me, 'The answer is 42,' yesterday.\"",
+      "expected_sentences": 1
+    },
+    {
+      "id": "url_email",
+      "text": "Visit https://www.example.com or contact support@example.com for help.",
+      "expected_min_tokens": 7
+    },
+    {
+      "id": "numbers_dates_times",
+      "text": "The meeting is on 2024-12-31 at 23:59:59 UTC in room 3.14159.",
+      "expected_min_entities": 2
+    }
+  ],
+  "performance_tests": [
+    {
+      "id": "short_text",
+      "text": "Quick test.",
+      "max_processing_ms": 100
+    },
+    {
+      "id": "medium_text",
+      "text": "The quick brown fox jumps over the lazy dog. This pangram contains every letter of the English alphabet at least once. It has been used for testing typewriters and computer keyboards for many decades. The sentence is also commonly used in typography to display font samples.",
+      "max_processing_ms": 500
+    },
+    {
+      "id": "long_text",
+      "text_repeat": "Natural language processing is a subfield of artificial intelligence. ",
+      "repeat_count": 1000,
+      "max_processing_ms": 5000
+    }
+  ]
+}

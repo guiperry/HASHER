@@ -312,10 +312,8 @@ func runEncoder(config *Config) error {
 		return fmt.Errorf("failed to initialize tokenizer: %w", err)
 	}
 
-	mp := mapper.New(config.MapperSeed)
 	ew := embeddings.NewWithBatchSize(config.BatchSize)
 
-	log.Printf("✓ Mapper initialized with seed %d", mp.GetSeed())
 	log.Printf("✓ Embeddings service initialized with batch size %d", config.BatchSize)
 	log.Printf("✓ Sliding window: size=%d, stride=%d", config.WindowSize, config.WindowStride)
 
@@ -329,9 +327,9 @@ func runEncoder(config *Config) error {
 		log.Printf("✅ Variance analysis complete: using top 24 high-signal dimensions")
 	}
 
-	// Create variance-aware mapper
-	varianceMapper := mapper.NewVarianceMapper(varianceIndices)
-	log.Printf("✓ Variance-aware mapper initialized with %d signal indices", len(varianceIndices))
+	// Create TensorPacker (replaces old mapper and varianceMapper)
+	tp := mapper.NewTensorPacker(varianceIndices)
+	log.Printf("✓ TensorPacker initialized with %d signal indices", len(varianceIndices))
 
 	// Check initial quota status
 	if cpManager != nil {
@@ -364,10 +362,10 @@ func runEncoder(config *Config) error {
 		fileType := detectFileType(config.InputFile)
 		if fileType == "arrow" {
 			// Process Arrow IPC stream
-			frameCount, err = processArrowFile(config.InputFile, mp, varianceMapper, tk, ew, &frames, config, cpManager)
+			frameCount, err = processArrowFile(config.InputFile, tp, tk, ew, &frames, config, cpManager)
 		} else {
 			// Process JSON format (array or JSONL)
-			frameCount, err = processJSONFile(config.InputFile, mp, varianceMapper, tk, ew, &frames, config, cpManager)
+			frameCount, err = processJSONFile(config.InputFile, tp, tk, ew, &frames, config, cpManager)
 		}
 
 		if err != nil {
@@ -445,7 +443,7 @@ func runEncoder(config *Config) error {
 }
 
 // processJSONFallback handles JSON processing
-func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processJSONFallback(filePath string, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	log.Printf("🔄 Attempting JSON processing from: %s", filePath)
 
 	content, err := os.ReadFile(filePath)
@@ -473,15 +471,15 @@ func processJSONFallback(filePath string, mp *mapper.Service, vm *mapper.Varianc
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
+		return processMinedRecords(&records, tp, tk, ew, frames, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, frames, config, cpManager)
+		return processJSONLRecords(contentStr, tp, tk, ew, frames, config, cpManager)
 	}
 }
 
 // processJSONFile processes JSON files with proper error handling
-func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processJSONFile(filePath string, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read input file: %w", err)
@@ -507,15 +505,15 @@ func processJSONFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMap
 		}
 
 		log.Printf("📋 Detected JSON array format with %d records", len(records))
-		return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
+		return processMinedRecords(&records, tp, tk, ew, frames, config, cpManager)
 	} else {
 		log.Printf("📋 Processing as JSONL format")
-		return processJSONLRecords(contentStr, mp, vm, tk, ew, frames, config, cpManager)
+		return processJSONLRecords(contentStr, tp, tk, ew, frames, config, cpManager)
 	}
 }
 
 // processDocumentRecords processes DocumentRecord chunks
-func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processDocumentRecords(records []schema.DocumentRecord, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
 	var recordCount int64
 	log.Printf("[BATCH] Starting to process %d DocumentRecords...", len(records))
@@ -536,12 +534,17 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 
 		// Convert DocumentRecord to MinedRecord format for processing
 		minedRecord := schema.MinedRecord{
-			FileName: record.FileName,
-			ChunkID:  int(record.ChunkID),
-			Content:  record.Content,
+			FileName:     record.FileName,
+			ChunkID:      int(record.ChunkID),
+			Content:      record.Content,
+			Tokens:       record.Tokens,
+			TokenOffsets: record.TokenOffsets,
+			POSTags:      record.POSTags,
+			Tenses:       record.Tenses,
+			DepHashes:    record.DepHashes,
 		}
 
-		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&minedRecord, &frameCount, tp, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process DocumentRecord %d: %w", i, err)
 		}
 
@@ -568,7 +571,7 @@ func processDocumentRecords(records []schema.DocumentRecord, mp *mapper.Service,
 }
 
 // processMinedRecords processes MinedRecord chunks from JSON array
-func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processMinedRecords(records *[]schema.MinedRecord, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var frameCount int64
 	var processedCount int64
 
@@ -582,7 +585,7 @@ func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *
 			continue
 		}
 
-		if err := processSingleRecordWithSlidingWindow(record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(record, &frameCount, tp, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process record %d: %w", i, err)
 		}
 
@@ -608,7 +611,7 @@ func processMinedRecords(records *[]schema.MinedRecord, mp *mapper.Service, vm *
 }
 
 // processJSONLRecords processes JSONL format records
-func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processJSONLRecords(content string, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	var recordCount, frameCount, fixedCount int64
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var updatedLines []string
@@ -652,7 +655,7 @@ func processJSONLRecords(content string, mp *mapper.Service, vm *mapper.Variance
 		}
 
 		// Process the record with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, tp, tk, ew, frames, config, cpManager); err != nil {
 			return 0, fmt.Errorf("failed to process record %d: %w", recordCount, err)
 		}
 
@@ -703,7 +706,7 @@ func fixJSONContent(content string) (string, bool) {
 	return fixed, original != fixed
 }
 
-func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
+func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount *int64, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
 	log.Printf("[PROCESS] Starting record %d from %s (content length: %d chars)", record.ChunkID, record.FileName, len(record.Content))
 
 	// Check quota availability before processing
@@ -721,6 +724,16 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 	if len(allTokens) < 2 {
 		log.Printf("⚠️  Insufficient tokens (%d) for sliding window in record %d from %s", len(allTokens), record.ChunkID, record.FileName)
 		return nil
+	}
+
+	// Pre-calculate token character offsets for mapping to SpaCy metadata
+	// This is necessary because tiktoken and SpaCy use different tokenization
+	tokenStartOffsets := make([]int, len(allTokens))
+	currentPos := 0
+	for i, tokenID := range allTokens {
+		tokenStartOffsets[i] = currentPos
+		tokenText := tk.Decode([]int{tokenID})
+		currentPos += len(tokenText)
 	}
 
 	// 2. Generate sliding windows
@@ -764,7 +777,6 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 		for i, window := range batch {
 			contextTexts[i] = tk.Decode(window.ContextTokens)
 		}
-		log.Printf("[PROCESS]   Extracted %d context texts (avg length: %d chars)", len(contextTexts), len(contextTexts[0]))
 
 		// 5. Get batch embeddings from Cloudflare
 		log.Printf("[PROCESS] Step 5/6: Requesting embeddings from endpoint...")
@@ -773,15 +785,44 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 			log.Printf("[PROCESS] ❌ Embedding request FAILED: %v", err)
 			return fmt.Errorf("batch embedding failed for record %d: %w", record.ChunkID, err)
 		}
-		log.Printf("[PROCESS]   Received %d embeddings (dimension: %d)", len(batchEmbeddings), len(batchEmbeddings[0]))
 
 		// 6. Process each window in the batch
 		log.Printf("[PROCESS] Step 6/6: Writing %d frames to JSON array...", len(batch))
 		for i, window := range batch {
-			// Map embedding to ASIC slots
-			asicSlots := mp.MapToSlots(batchEmbeddings[i])
+			// Find corresponding SpaCy metadata for the target token
+			// We use the character offset of the target token to find the match
+			targetTokenIdx := window.EndPos // In our SlidingWindow, EndPos is the target token index
+			targetOffset := int32(tokenStartOffsets[targetTokenIdx])
 
-			// Create training frame with sliding window metadata
+			var pos uint8 = 0
+			var tense uint8 = 0
+			var depHash uint32 = 0
+
+			// Simple search for the SpaCy token that covers this character offset
+			for j, spacyOffset := range record.TokenOffsets {
+				if spacyOffset == targetOffset {
+					pos = record.POSTags[j]
+					tense = record.Tenses[j]
+					depHash = record.DepHashes[j]
+					break
+				}
+			}
+
+			// Temporal Memory XOR logic (Slots 6-8) - placeholder for now
+			// In a full implementation, we would keep a rolling buffer of previous headers
+			memoryBuffer := make([]uint32, 3)
+
+			// Pack the frame into the 12-slot specification
+			asicSlots := tp.PackFrame(
+				batchEmbeddings[i],
+				pos,
+				tense,
+				depHash,
+				memoryBuffer,
+				uint16(targetTokenIdx),
+			)
+
+			// Create training frame
 			frame := schema.TrainingFrame{
 				SourceFile:    record.FileName,
 				ChunkID:       int32(record.ChunkID),
@@ -796,20 +837,13 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 			*frames = append(*frames, frame)
 			*frameCount++
 		}
-		log.Printf("[PROCESS]   Wrote %d frames (total: %d)", len(batch), *frameCount)
-
-		// Progress logging for large batches
-		if len(windows) > config.BatchSize && batchStart%(config.BatchSize*2) == 0 {
-			log.Printf("📊 Processed %d/%d windows for record %d, generated %d frames...",
-				batchStart, len(windows), record.ChunkID, *frameCount)
-		}
 	}
 
 	log.Printf("[PROCESS] ✅ Completed record %d: %d windows -> %d frames", record.ChunkID, len(windows), *frameCount)
 	return nil
 }
 
-func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
+func processStreamingJSON(jsonFile *os.File, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) error {
 	decoder := json.NewDecoder(jsonFile)
 	decoder.DisallowUnknownFields()
 
@@ -833,7 +867,7 @@ func processStreamingJSON(jsonFile *os.File, mp *mapper.Service, vm *mapper.Vari
 		recordCount++
 
 		// Process with sliding windows
-		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, mp, vm, tk, ew, frames, config, cpManager); err != nil {
+		if err := processSingleRecordWithSlidingWindow(&record, &frameCount, tp, tk, ew, frames, config, cpManager); err != nil {
 			return fmt.Errorf("failed to process record %d: %w", recordCount, err)
 		}
 
@@ -876,17 +910,17 @@ func fixAndRetryRecord(decoder *json.Decoder, record *schema.MinedRecord, config
 }
 
 // processArrowFile processes Arrow IPC stream files
-func processArrowFile(filePath string, mp *mapper.Service, vm *mapper.VarianceMapper, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
+func processArrowFile(filePath string, tp *mapper.TensorPacker, tk *tokenizer.Service, ew *embeddings.Service, frames *[]schema.TrainingFrame, config *Config, cpManager *checkpoint.Manager) (int64, error) {
 	log.Printf("🔄 Attempting Arrow IPC stream processing from: %s", filePath)
 
 	// Read records from Arrow IPC stream
-	records, err := schema.ReadMinedRecordsFromArrowIPC(filePath)
+	records, err := schema.ReadDocumentRecordsFromArrowIPC(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read Arrow IPC stream: %w", err)
 	}
 
 	log.Printf("📋 Detected Arrow IPC format with %d records", len(records))
-	return processMinedRecords(&records, mp, vm, tk, ew, frames, config, cpManager)
+	return processDocumentRecords(records, tp, tk, ew, frames, config, cpManager)
 }
 
 func writeJSONOutput(filePath string, frames []schema.TrainingFrame) error {
@@ -916,10 +950,13 @@ func fixJSONString(jsonStr string) string {
 	controlCharRegex := regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
 	fixed = controlCharRegex.ReplaceAllString(fixed, "")
 
-	// Step 3: Fix invalid escape sequences by removing the backslash entirely
-	// This catches \i, \ , etc. which are not valid JSON escapes
-	invalidBackslashRegex := regexp.MustCompile(`\\[^"\\bfnrt/]`)
-	fixed = invalidBackslashRegex.ReplaceAllString(fixed, "")
+	// Step 3: Fix invalid escape sequences
+	// Handle escaped backslash followed by invalid char FIRST: \\ + invalid -> just invalid
+	// This matches \\ (escaped backslash) followed by any invalid char
+	fixed = regexp.MustCompile(`\\\\([^"\\bfnrt/])`).ReplaceAllString(fixed, "$1")
+
+	// Then handle single backslash followed by invalid char: \ + invalid -> just invalid
+	fixed = regexp.MustCompile(`\\([^"\\bfnrt/])`).ReplaceAllString(fixed, "$1")
 
 	return fixed
 }

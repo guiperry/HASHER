@@ -6,6 +6,35 @@ type DocumentRecord struct {
 	ChunkID   int32     `parquet:"name=chunk_id, type=INT32"`
 	Content   string    `parquet:"name=content, type=BYTE_ARRAY, convertedtype=UTF8"`
 	Embedding []float32 `parquet:"name=embedding, type=LIST, valuetype=FLOAT"`
+
+	// NLP Metadata (from NLP Bridge)
+	Tokens       []string `parquet:"name=tokens, type=LIST, valuetype=BYTE_ARRAY, valueconvertedtype=UTF8"`
+	TokenOffsets []int32  `parquet:"name=token_offsets, type=LIST, valuetype=INT32"`
+	POSTags      []uint8  `parquet:"name=pos_tags, type=LIST, valuetype=INT32"`
+	Tenses       []uint8  `parquet:"name=tenses, type=LIST, valuetype=INT32"`
+	DepHashes    []uint32 `parquet:"name=dep_hashes, type=LIST, valuetype=INT32"`
+}
+
+// AlpacaRecord defines the standard instruction-tuning format
+type AlpacaRecord struct {
+	Instruction string `json:"instruction"`
+	Input       string `json:"input"`
+	Output      string `json:"output"`
+}
+
+// AlpacaDocumentRecord combines Alpaca format with our ML-ready metadata
+type AlpacaDocumentRecord struct {
+	AlpacaRecord
+	FileName  string    `json:"file_name"`
+	ChunkID   int32     `json:"chunk_id"`
+	Embedding []float32 `json:"embedding"`
+
+	// NLP Metadata (from NLP Bridge)
+	Tokens       []string `json:"tokens"`
+	TokenOffsets []int32  `json:"token_offsets"`
+	POSTags      []uint8  `json:"pos_tags"`
+	Tenses       []uint8  `json:"tenses"`
+	DepHashes    []uint32 `json:"dep_hashes"`
 }
 
 // Config holds application configuration
@@ -16,6 +45,7 @@ type Config struct {
 	ChunkSize    int
 	ChunkOverlap int
 	OllamaModel  string
+	OllamaGenModel string
 	OllamaHost   string
 	CheckpointDB string
 	BatchSize    int
@@ -40,6 +70,7 @@ type Config struct {
 	OptimizedMode  bool
 	HybridMode     bool
 	NoArxivMode    bool
+	GoatMode       bool
 	DryRun         bool
 
 	// Environment configuration
