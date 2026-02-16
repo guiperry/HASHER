@@ -266,7 +266,7 @@ func (tr *TrainingRecord) Validate() bool {
 		return false
 	}
 
-	if tr.TargetToken <= 0 {
+	if tr.TargetToken < 0 {
 		return false
 	}
 

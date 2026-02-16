@@ -430,6 +430,7 @@ func (to *TrainingOrchestrator) runTrainingWithData(ctx context.Context, maxEpoc
 
 		// Process records in batches
 		batchSize := populationSize
+		epochTrainedCount := 0
 		for i := 0; i < len(records); i += batchSize {
 			end := i + batchSize
 			if end > len(records) {
@@ -437,14 +438,21 @@ func (to *TrainingOrchestrator) runTrainingWithData(ctx context.Context, maxEpoc
 			}
 
 			batch := records[i:end]
-			if err := to.trainBatch(ctx, batch); err != nil {
+			trained, err := to.trainBatch(ctx, batch)
+			if err != nil {
 				to.logger.Error("Batch %d-%d failed: %v", i, end-1, err)
 				return err
 			}
+			epochTrainedCount += trained
 
 			if i%(batchSize*10) == 0 {
 				to.logger.Debug("Processed %d/%d records", i, len(records))
 			}
+		}
+
+		if epochTrainedCount == 0 && epoch > 0 {
+			to.logger.Info("All records already have winning seeds for current difficulty. Training complete.")
+			break
 		}
 
 		if epoch%2 == 0 {
@@ -481,21 +489,29 @@ func (to *TrainingOrchestrator) runEpoch(ctx context.Context, epoch int, tokenMa
 	return nil
 }
 
-func (to *TrainingOrchestrator) trainBatch(ctx context.Context, records []*training.TrainingRecord) error {
+func (to *TrainingOrchestrator) trainBatch(ctx context.Context, records []*training.TrainingRecord) (int, error) {
+	trainedCount := 0
 	for _, record := range records {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return trainedCount, ctx.Err()
 		default:
+		}
+
+		// Check if we already have a winning seed for this token
+		hasCheckpoint, err := to.checkpointMgr.HasCheckpoint(record.TargetToken)
+		if err == nil && hasCheckpoint {
+			continue
 		}
 
 		if err := to.trainRecord(ctx, record); err != nil {
 			to.logger.Warn("Failed to train record for token %d: %v", record.TargetToken, err)
 			continue
 		}
+		trainedCount++
 	}
 
-	return nil
+	return trainedCount, nil
 }
 
 func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *training.TrainingRecord) error {
@@ -675,6 +691,7 @@ func (to *TrainingOrchestrator) saveWinningSeed(record *training.TrainingRecord,
 	to.logger.Info("[DEBUG] saveWinningSeed: Token %d, Slot0: %d, Source: %s",
 		record.TargetToken, record.FeatureVector[0], record.SourceFile)
 
+	// Ensure we pass the actual record's feature vector and source file for matching
 	if err := to.seedWriter.AddSeedWrite(record.SourceFile, record.FeatureVector, record.TargetToken, seed.Seed); err != nil {
 		to.logger.Warn("Failed to queue seed write-back for token %d: %v", record.TargetToken, err)
 	} else {

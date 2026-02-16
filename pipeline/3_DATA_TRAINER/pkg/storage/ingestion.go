@@ -244,11 +244,15 @@ func (di *DataIngestor) getAvailableFiles() ([]string, error) {
 		if info.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(info.Name()), ".parquet") {
+		name := strings.ToLower(info.Name())
+		if strings.Contains(name, "_with_seeds") {
+			return nil
+		}
+		if strings.HasSuffix(name, ".parquet") {
 			files = append(files, path)
-		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".json") && !strings.Contains(strings.ToLower(info.Name()), ".checkpoint.") {
+		} else if strings.HasSuffix(name, ".json") && !strings.Contains(name, ".checkpoint.") {
 			files = append(files, path)
-		} else if strings.HasSuffix(strings.ToLower(info.Name()), ".arrow") {
+		} else if strings.HasSuffix(name, ".arrow") {
 			files = append(files, path)
 		}
 		return nil
@@ -437,11 +441,14 @@ func (di *DataIngestor) readJSONFile(filePath string) ([]*training.TrainingRecor
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	di.logger.Info("Successfully loaded %d JSON records", len(jsonRecords))
+	di.logger.Info("Successfully loaded %d JSON records from %s", len(jsonRecords), filepath.Base(filePath))
 
 	// Convert JSON records to training records
 	var records []*training.TrainingRecord
+	fileName := filepath.Base(filePath)
 	for _, jsonRec := range jsonRecords {
+		// Override record's internal source file with the actual filename on disk
+		jsonRec.SourceFile = fileName
 		record := di.convertJSONRecord(&jsonRec)
 		if record != nil {
 			records = append(records, record)
@@ -483,11 +490,11 @@ except Exception as e:
 	}
 
 	// Now read the CSV file
-	return di.readCSVAndConvert(tempCSV)
+	return di.readCSVAndConvert(tempCSV, filepath.Base(filePath))
 }
 
 // readCSVAndConvert reads CSV file and converts to training records
-func (di *DataIngestor) readCSVAndConvert(csvPath string) ([]*training.TrainingRecord, error) {
+func (di *DataIngestor) readCSVAndConvert(csvPath string, originalFileName string) ([]*training.TrainingRecord, error) {
 	file, err := os.Open(csvPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open CSV file: %w", err)
@@ -513,7 +520,9 @@ func (di *DataIngestor) readCSVAndConvert(csvPath string) ([]*training.TrainingR
 		// Parse CSV line manually (simple approach)
 		fields := strings.Split(line, ",")
 		if len(fields) >= 15 { // We have at least source_file, chunk_id, asic_slots_0-11, target_token_id
-			record := &training.TrainingRecord{}
+			record := &training.TrainingRecord{
+				SourceFile: originalFileName,
+			}
 
 			// Parse the fields we can access directly
 			// This is a simplified approach for demo
@@ -563,8 +572,9 @@ func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.Trai
 		SourceFile:    jr.SourceFile,
 		ChunkID:       jr.ChunkID,
 		WindowStart:   jr.WindowStart,
-		TargetToken: jr.TargetTokenID,
-		ContextHash: uint32(jr.ChunkID), // Using ChunkID as context identifier
+		TargetToken:   jr.TargetTokenID,
+		TokenSequence: jr.TokenSequence,
+		ContextHash:   uint32(jr.ChunkID), // Using ChunkID as context identifier
 	}
 
 	// Map ASIC slots to FeatureVector
@@ -582,7 +592,7 @@ func (di *DataIngestor) convertJSONRecord(jr *JSONTrainingRecord) *training.Trai
 	return record
 }
 
-func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *training.TrainingRecord {
+func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord, fileName string) *training.TrainingRecord {
 	// Skip records that already have a best seed
 	if len(pr.BestSeed) > 0 {
 		di.logger.Debug("Skipping already trained Parquet record for token %d", pr.TargetTokenID)
@@ -590,11 +600,11 @@ func (di *DataIngestor) convertParquetRecord(pr *ParquetTrainingRecord) *trainin
 	}
 
 	record := &training.TrainingRecord{
-		SourceFile:    pr.SourceFile,
+		SourceFile:    fileName,
 		ChunkID:       pr.ChunkID,
 		WindowStart:   pr.WindowStart,
-		TargetToken: pr.TargetTokenID,
-		ContextHash: uint32(pr.ChunkID), // Using ChunkID as context identifier
+		TargetToken:   pr.TargetTokenID,
+		ContextHash:   uint32(pr.ChunkID), // Using ChunkID as context identifier
 	}
 
 	// Map ASIC slots to FeatureVector
@@ -658,8 +668,9 @@ func (di *DataIngestor) ReadTrainingRecordsChunked(filePath string, chunkOffset 
 		endIdx = int64(len(parquetRecords))
 	}
 
+	fileName := filepath.Base(filePath)
 	for i := startIdx; i < endIdx; i++ {
-		record := di.convertParquetRecord(&parquetRecords[i])
+		record := di.convertParquetRecord(&parquetRecords[i], fileName)
 		if record != nil {
 			records = append(records, record)
 		}
@@ -686,6 +697,7 @@ func (di *DataIngestor) ProcessAllFilesWithProgress(progressCallback func(*Inges
 		return nil, fmt.Errorf("no parquet or json files found in %s", di.basePath)
 	}
 
+	di.logger.Info("Ingesting from files: %v", availableFiles)
 	di.logger.Info("Found %d parquet/json file(s)", len(availableFiles))
 
 	// Get total records estimate for progress bar

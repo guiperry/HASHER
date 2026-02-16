@@ -38,6 +38,7 @@ type JSONTrainingRecord struct {
 
 	// Target
 	TargetTokenID int32
+	TokenSequence []int32
 
 	// Seed (placeholder for Stage 3)
 	BestSeed []byte
@@ -94,21 +95,55 @@ func (jtr *JSONTrainingRecord) UnmarshalJSON(data []byte) error {
 	jtr.WindowEnd = getInt32("window_end", "WindowEnd")
 	jtr.ContextLength = getInt32("context_length", "ContextLength")
 
-	jtr.AsicSlots0 = getInt32("asic_slot_0", "AsicSlots0")
-	jtr.AsicSlots1 = getInt32("asic_slot_1", "AsicSlots1")
-	jtr.AsicSlots2 = getInt32("asic_slot_2", "AsicSlots2")
-	jtr.AsicSlots3 = getInt32("asic_slot_3", "AsicSlots3")
-	jtr.AsicSlots4 = getInt32("asic_slot_4", "AsicSlots4")
-	jtr.AsicSlots5 = getInt32("asic_slot_5", "AsicSlots5")
-	jtr.AsicSlots6 = getInt32("asic_slot_6", "AsicSlots6")
-	jtr.AsicSlots7 = getInt32("asic_slot_7", "AsicSlots7")
-	jtr.AsicSlots8 = getInt32("asic_slot_8", "AsicSlots8")
-	jtr.AsicSlots9 = getInt32("asic_slot_9", "AsicSlots9")
-	jtr.AsicSlots10 = getInt32("asic_slot_10", "AsicSlots10")
-	jtr.AsicSlots11 = getInt32("asic_slot_11", "AsicSlots11")
+	// Try "feature_vector" array first
+	if fv, ok := aux["feature_vector"].([]interface{}); ok && len(fv) >= 12 {
+		jtr.AsicSlots0 = int32(fv[0].(float64))
+		jtr.AsicSlots1 = int32(fv[1].(float64))
+		jtr.AsicSlots2 = int32(fv[2].(float64))
+		jtr.AsicSlots3 = int32(fv[3].(float64))
+		jtr.AsicSlots4 = int32(fv[4].(float64))
+		jtr.AsicSlots5 = int32(fv[5].(float64))
+		jtr.AsicSlots6 = int32(fv[6].(float64))
+		jtr.AsicSlots7 = int32(fv[7].(float64))
+		jtr.AsicSlots8 = int32(fv[8].(float64))
+		jtr.AsicSlots9 = int32(fv[9].(float64))
+		jtr.AsicSlots10 = int32(fv[10].(float64))
+		jtr.AsicSlots11 = int32(fv[11].(float64))
+	} else {
+		// Fallback to individual slots
+		jtr.AsicSlots0 = getInt32("asic_slot_0", "AsicSlots0")
+		jtr.AsicSlots1 = getInt32("asic_slot_1", "AsicSlots1")
+		jtr.AsicSlots2 = getInt32("asic_slot_2", "AsicSlots2")
+		jtr.AsicSlots3 = getInt32("asic_slot_3", "AsicSlots3")
+		jtr.AsicSlots4 = getInt32("asic_slot_4", "AsicSlots4")
+		jtr.AsicSlots5 = getInt32("asic_slot_5", "AsicSlots5")
+		jtr.AsicSlots6 = getInt32("asic_slot_6", "AsicSlots6")
+		jtr.AsicSlots7 = getInt32("asic_slot_7", "AsicSlots7")
+		jtr.AsicSlots8 = getInt32("asic_slot_8", "AsicSlots8")
+		jtr.AsicSlots9 = getInt32("asic_slot_9", "AsicSlots9")
+		jtr.AsicSlots10 = getInt32("asic_slot_10", "AsicSlots10")
+		jtr.AsicSlots11 = getInt32("asic_slot_11", "AsicSlots11")
+	}
 
-	jtr.TargetTokenID = getInt32("target_token_id", "TargetTokenID")
+	jtr.TargetTokenID = getInt32("target_token", "target_token_id", "TargetTokenID")
 	jtr.BestSeed = getBytes("best_seed", "BestSeed")
+
+	// Unmarshal TokenSequence
+	if ts, ok := aux["token_sequence"].([]interface{}); ok {
+		jtr.TokenSequence = make([]int32, len(ts))
+		for i, v := range ts {
+			if f, ok := v.(float64); ok {
+				jtr.TokenSequence[i] = int32(f)
+			}
+		}
+	} else if ts, ok := aux["TokenSequence"].([]interface{}); ok {
+		jtr.TokenSequence = make([]int32, len(ts))
+		for i, v := range ts {
+			if f, ok := v.(float64); ok {
+				jtr.TokenSequence[i] = int32(f)
+			}
+		}
+	}
 
 	return nil
 }

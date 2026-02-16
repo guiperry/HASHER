@@ -35,7 +35,6 @@ func (sw *JSONSeedWriter) generateAsicKey(slots [12]uint32, targetTokenID int32)
 		targetTokenID)
 }
 
-// AddSeedWrite queues a best seed using ASIC slots + target token as the unique identifier
 func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, targetTokenID int32, bestSeed []byte) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -44,8 +43,9 @@ func (sw *JSONSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, targ
 		return fmt.Errorf("cannot write empty seed")
 	}
 
-	// Use generic name if source is empty
-	if sourceFile == "" {
+	// Normalize sourceFile to its base name
+	sourceFile = filepath.Base(sourceFile)
+	if sourceFile == "" || sourceFile == "." || sourceFile == "synthetic" {
 		sourceFile = "training_frames.json"
 	}
 
@@ -73,15 +73,25 @@ func (sw *JSONSeedWriter) WriteBack() error {
 			continue
 		}
 
-		// Determine output file path
-		ext := filepath.Ext(sourceFile)
-		base := strings.TrimSuffix(filepath.Base(sourceFile), ext)
-		outputFile := filepath.Join(sw.dataPath, "frames", base+"_with_seeds"+ext)
+		// Force .json extension for JSONSeedWriter
+		base := strings.TrimSuffix(filepath.Base(sourceFile), filepath.Ext(sourceFile))
+		// Avoid double-suffixing if sourceFile already contains _with_seeds
+		cleanBase := strings.TrimSuffix(base, "_with_seeds")
+		outputFile := filepath.Join(sw.dataPath, "frames", cleanBase+"_with_seeds.json")
 		
-		// If sourceFile is a full path, use it directly to find the source
-		sourcePath := sourceFile
-		if !filepath.IsAbs(sourcePath) {
-			sourcePath = filepath.Join(sw.dataPath, "frames", sourceFile)
+		// Search for source file in common locations
+		potentialPaths := []string{
+			filepath.Join(sw.dataPath, "frames", base+".json"),
+			filepath.Join(sw.dataPath, "json", base+".json"),
+			filepath.Join(sw.dataPath, "frames/archive", base+".json"),
+		}
+
+		sourcePath := ""
+		for _, p := range potentialPaths {
+			if _, err := os.Stat(p); err == nil {
+				sourcePath = p
+				break
+			}
 		}
 
 		// 1. Initialize cache for this file if empty
@@ -93,12 +103,16 @@ func (sw *JSONSeedWriter) WriteBack() error {
 			}
 			
 			// Safety check: if readPath doesn't exist, we can't do anything
+			if readPath == "" {
+				fmt.Printf("[WARN] JSONSeedWriter: No source path found for %s among %v\n", sourceFile, potentialPaths)
+				continue
+			}
 			if _, err := os.Stat(readPath); os.IsNotExist(err) {
 				fmt.Printf("[WARN] JSONSeedWriter: Source file not found: %s\n", readPath)
 				continue
 			}
 
-			fmt.Printf("[DEBUG] JSONSeedWriter: Initializing cache from %s\n", filepath.Base(readPath))
+			fmt.Printf("[DEBUG] JSONSeedWriter: Initializing cache from %s\n", readPath)
 			data, err := os.ReadFile(readPath)
 			if err != nil {
 				return fmt.Errorf("failed to read JSON source %s: %w", readPath, err)
@@ -120,24 +134,38 @@ func (sw *JSONSeedWriter) WriteBack() error {
 			// Extract ASIC slots
 			var slots [12]uint32
 			foundSlots := true
-			for j := 0; j < 12; j++ {
-				key := fmt.Sprintf("asic_slot_%d", j)
-				valRaw, ok := record[key]
-				if !ok {
-					key = fmt.Sprintf("AsicSlots%d", j)
-					valRaw, ok = record[key]
-				}
-				
-				if ok {
-					if valFloat, ok := valRaw.(float64); ok {
-						slots[j] = uint32(int32(valFloat))
+
+			// Try "feature_vector" array first
+			if fv, ok := record["feature_vector"].([]interface{}); ok && len(fv) >= 12 {
+				for j := 0; j < 12; j++ {
+					if val, ok := fv[j].(float64); ok {
+						slots[j] = uint32(uint64(val))
 					} else {
 						foundSlots = false
 						break
 					}
-				} else {
-					foundSlots = false
-					break
+				}
+			} else {
+				// Fallback to individual slot keys
+				for j := 0; j < 12; j++ {
+					key := fmt.Sprintf("asic_slot_%d", j)
+					valRaw, ok := record[key]
+					if !ok {
+						key = fmt.Sprintf("AsicSlots%d", j)
+						valRaw, ok = record[key]
+					}
+					
+					if ok {
+						if valFloat, ok := valRaw.(float64); ok {
+							slots[j] = uint32(uint64(valFloat))
+						} else {
+							foundSlots = false
+							break
+						}
+					} else {
+						foundSlots = false
+						break
+					}
 				}
 			}
 
@@ -146,15 +174,21 @@ func (sw *JSONSeedWriter) WriteBack() error {
 			}
 
 			// Extract TargetTokenID
-			targetIDRaw, ok := record["target_token_id"].(float64)
-			if !ok {
-				targetIDRaw, _ = record["TargetTokenID"].(float64)
+			var targetTokenID int32
+			if tID, ok := record["target_token"].(float64); ok {
+				targetTokenID = int32(tID)
+			} else if tID, ok := record["target_token_id"].(float64); ok {
+				targetTokenID = int32(tID)
+			} else if tID, ok := record["TargetTokenID"].(float64); ok {
+				targetTokenID = int32(tID)
+			} else {
+				continue // Target token not found
 			}
-			targetTokenID := int32(targetIDRaw)
 
 			key := sw.generateAsicKey(slots, targetTokenID)
+			found := false
 			if seed, ok := writes[key]; ok {
-				// Use original casing if present, default to snake_case
+				fmt.Printf("[DEBUG] JSONSeedWriter: EXACT MATCH FOUND for Token %d, updating seed...\n", targetTokenID)
 				if _, exists := record["best_seed"]; exists {
 					record["best_seed"] = seed
 				} else if _, exists := record["BestSeed"]; exists {
@@ -163,6 +197,30 @@ func (sw *JSONSeedWriter) WriteBack() error {
 					record["best_seed"] = seed
 				}
 				updated++
+				found = true
+			} else {
+				// Fallback: Check if any queued seed matches THIS targetTokenID
+				// This handles cases where ASIC slots might have subtle mismatches in synthetic data
+				for qKey, seed := range writes {
+					if strings.HasSuffix(qKey, fmt.Sprintf(":%d", targetTokenID)) {
+						fmt.Printf("[DEBUG] JSONSeedWriter: FALLBACK MATCH for Token %d, updating seed...\n", targetTokenID)
+						if _, exists := record["best_seed"]; exists {
+							record["best_seed"] = seed
+						} else if _, exists := record["BestSeed"]; exists {
+							record["BestSeed"] = seed
+						} else {
+							record["best_seed"] = seed
+						}
+						updated++
+						found = true
+						break
+					}
+				}
+			}
+
+			if !found && i == 0 {
+				// Periodically log key attempts to help debug mismatches
+				fmt.Printf("[DEBUG] JSONSeedWriter: Record[0] key: %s\n", key)
 			}
 		}
 

@@ -45,8 +45,9 @@ func (aw *ArrowSeedWriter) AddSeedWrite(sourceFile string, slots [12]uint32, tar
 		return fmt.Errorf("cannot write empty seed")
 	}
 
-	// Use generic name if source is empty
-	if sourceFile == "" {
+	// Normalize sourceFile to its base name
+	sourceFile = filepath.Base(sourceFile)
+	if sourceFile == "" || sourceFile == "." || sourceFile == "synthetic" {
 		sourceFile = "training_frames.arrow"
 	}
 
@@ -73,15 +74,25 @@ func (aw *ArrowSeedWriter) WriteBack() error {
 			continue
 		}
 
-		// Determine output file path
-		ext := filepath.Ext(sourceFile)
-		base := strings.TrimSuffix(filepath.Base(sourceFile), ext)
-		outputFile := filepath.Join(aw.dataPath, "frames", base+"_with_seeds"+ext)
+		// Force .arrow extension for ArrowSeedWriter
+		base := strings.TrimSuffix(filepath.Base(sourceFile), filepath.Ext(sourceFile))
+		// Avoid double-suffixing
+		cleanBase := strings.TrimSuffix(base, "_with_seeds")
+		outputFile := filepath.Join(aw.dataPath, "frames", cleanBase+"_with_seeds.arrow")
 		
-		// If sourceFile is a full path, use it directly to find the source
-		sourcePath := sourceFile
-		if !filepath.IsAbs(sourcePath) {
-			sourcePath = filepath.Join(aw.dataPath, "frames", sourceFile)
+		// Search for source file in common locations
+		potentialPaths := []string{
+			filepath.Join(aw.dataPath, "frames", base+".arrow"),
+			filepath.Join(aw.dataPath, "json", base+".arrow"),
+			filepath.Join(aw.dataPath, "frames/archive", base+".arrow"),
+		}
+
+		sourcePath := ""
+		for _, p := range potentialPaths {
+			if _, err := os.Stat(p); err == nil {
+				sourcePath = p
+				break
+			}
 		}
 
 		// 1. Initialize cache for this file if empty
@@ -93,12 +104,16 @@ func (aw *ArrowSeedWriter) WriteBack() error {
 			}
 			
 			// Safety check
+			if readPath == "" {
+				fmt.Printf("[WARN] ArrowSeedWriter: No source path found for %s among %v\n", sourceFile, potentialPaths)
+				continue
+			}
 			if _, err := os.Stat(readPath); os.IsNotExist(err) {
 				fmt.Printf("[WARN] ArrowSeedWriter: Source file not found: %s\n", readPath)
 				continue
 			}
 
-			fmt.Printf("[DEBUG] ArrowSeedWriter: Initializing cache from %s\n", filepath.Base(readPath))
+			fmt.Printf("[DEBUG] ArrowSeedWriter: Initializing cache from %s\n", readPath)
 			records, err := ReadTrainingRecordsFromArrowIPC(readPath)
 			if err != nil {
 				return fmt.Errorf("failed to read Arrow source %s: %w", readPath, err)
@@ -115,6 +130,15 @@ func (aw *ArrowSeedWriter) WriteBack() error {
 			if seed, ok := writes[key]; ok {
 				record.BestSeed = seed
 				updated++
+			} else {
+				// Fallback matching by TargetTokenID
+				for qKey, seed := range writes {
+					if strings.HasSuffix(qKey, fmt.Sprintf(":%d", record.TargetToken)) {
+						record.BestSeed = seed
+						updated++
+						break
+					}
+				}
 			}
 		}
 

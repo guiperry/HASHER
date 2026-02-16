@@ -55,6 +55,7 @@ func ReadTrainingRecordsFromArrowIPC(filePath string) ([]*training.TrainingRecor
 	defer r.Release()
 
 	var records []*training.TrainingRecord
+	fileName := filepath.Base(filePath)
 
 	// Read all batches
 	for r.Next() {
@@ -63,6 +64,12 @@ func ReadTrainingRecordsFromArrowIPC(filePath string) ([]*training.TrainingRecor
 		if err != nil {
 			return nil, err
 		}
+		
+		// Override source_file with actual filename for all records in this batch
+		for _, rec := range trainingRecords {
+			rec.SourceFile = fileName
+		}
+		
 		records = append(records, trainingRecords...)
 	}
 
