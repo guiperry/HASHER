@@ -474,7 +474,7 @@ func NewModel() Model {
 			{
 				Name:    "data-miner",
 				BinName: "data-miner",
-				Args:    []string{"workflow"},
+				Args:    []string{"-goat"},
 				Desc:    "Data Miner - Processing documents and PDFs",
 			},
 			{
@@ -2344,6 +2344,16 @@ func (m Model) runPipelineStage(binDir string, stageIndex int) tea.Cmd {
 			}
 		}
 
+		// For data-miner, ensure spacy library is available
+		if stage.BinName == "data-miner" {
+			m.ensureSpacyLib(binDir)
+		}
+
+		// For data-trainer, ensure cuda library is available
+		if stage.BinName == "data-trainer" {
+			m.ensureCudaLib(binDir)
+		}
+
 		// Create command
 		var cmd *exec.Cmd
 		if len(stage.Args) > 0 {
@@ -2352,6 +2362,11 @@ func (m Model) runPipelineStage(binDir string, stageIndex int) tea.Cmd {
 			cmd = exec.Command(binaryPath)
 		}
 		cmd.Dir = binDir
+
+		// Set LD_LIBRARY_PATH for required libraries
+		if stage.BinName == "data-miner" || stage.BinName == "data-trainer" {
+			cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+binDir+":"+os.Getenv("LD_LIBRARY_PATH"))
+		}
 
 		// Capture output for streaming
 		stdout, err := cmd.StdoutPipe()
@@ -2393,6 +2408,64 @@ func (m Model) runPipelineStage(binDir string, stageIndex int) tea.Cmd {
 		return PipelineLogMsg{
 			Log:        logMsg,
 			StageIndex: stageIndex,
+		}
+	}
+}
+
+// ensureSpacyLib ensures the spacy library is available in the bin directory
+func (m Model) ensureSpacyLib(binDir string) {
+	// Check if library already exists in bin directory
+	libPath := filepath.Join(binDir, "libspacy_wrapper.so")
+	if _, err := os.Stat(libPath); err == nil {
+		return // Library already exists
+	}
+
+	// Try to find the library in common locations
+	searchPaths := []string{
+		filepath.Join(os.Getenv("HOME"), "Documents", "GitHub", "LAB", "HASHER", "pipeline", "1_DATA_MINER", "spacy", "lib", "libspacy_wrapper.so"),
+		filepath.Join(os.Getenv("HOME"), "hasher", "pipeline", "1_DATA_MINER", "spacy", "lib", "libspacy_wrapper.so"),
+		"/usr/local/lib/libspacy_wrapper.so",
+	}
+
+	for _, srcPath := range searchPaths {
+		if _, err := os.Stat(srcPath); err == nil {
+			// Copy the library to bin directory
+			data, err := os.ReadFile(srcPath)
+			if err == nil {
+				err = os.WriteFile(libPath, data, 0755)
+				if err == nil {
+					return // Successfully copied
+				}
+			}
+		}
+	}
+}
+
+// ensureCudaLib ensures the cuda library is available in the bin directory
+func (m Model) ensureCudaLib(binDir string) {
+	// Check if library already exists in bin directory
+	libPath := filepath.Join(binDir, "libcuda_hash.so")
+	if _, err := os.Stat(libPath); err == nil {
+		return // Library already exists
+	}
+
+	// Try to find the library in common locations
+	searchPaths := []string{
+		filepath.Join(os.Getenv("HOME"), "Documents", "GitHub", "LAB", "HASHER", "pkg", "hashing", "methods", "cuda", "libcuda_hash.so"),
+		filepath.Join(os.Getenv("HOME"), "hasher", "pkg", "hashing", "methods", "cuda", "libcuda_hash.so"),
+		"/usr/local/lib/libcuda_hash.so",
+	}
+
+	for _, srcPath := range searchPaths {
+		if _, err := os.Stat(srcPath); err == nil {
+			// Copy the library to bin directory
+			data, err := os.ReadFile(srcPath)
+			if err == nil {
+				err = os.WriteFile(libPath, data, 0755)
+				if err == nil {
+					return // Successfully copied
+				}
+			}
 		}
 	}
 }
@@ -2446,6 +2519,8 @@ func (m Model) streamPipelineOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr 
 	defer stdout.Close()
 	defer stderr.Close()
 
+	logger := GetLogger()
+
 	stdoutScanner := bufio.NewScanner(stdout)
 	go func() {
 		for stdoutScanner.Scan() {
@@ -2457,6 +2532,7 @@ func (m Model) streamPipelineOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr 
 				}
 				logMsg := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), line)
 				m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
+				logger.Write(logMsg + "\n")
 			}
 		}
 	}()
@@ -2472,6 +2548,7 @@ func (m Model) streamPipelineOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr 
 				}
 				logMsg := fmt.Sprintf("[%s] [stderr] %s", time.Now().Format("15:04:05"), line)
 				m.PipelineLogChan <- PipelineLogMsg{Log: logMsg, StageIndex: stageIndex}
+				logger.Write(logMsg + "\n")
 			}
 		}
 	}()
