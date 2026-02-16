@@ -540,12 +540,14 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 		to.harness.Generation = gen
 
 		if gen%10 == 0 || gen == *maxGenerations-1 {
-			bestMatch := 0
+			bestPrefix := 0
+			bestHamming := 0
 			if len(eliteSeeds) > 0 {
 				diff := eliteSeeds[0].HashOutput ^ uint32(record.TargetToken)
-				bestMatch = bits.LeadingZeros32(diff)
+				bestPrefix = bits.LeadingZeros32(diff)
+				bestHamming = 32 - bits.OnesCount32(diff)
 			}
-			stats := fmt.Sprintf("fit=%.4f best=%d bits", pop.Fitness, bestMatch)
+			stats := fmt.Sprintf("fit=%.4f prefix=%d ham=%d", pop.Fitness, bestPrefix, bestHamming)
 			to.logger.ProgressBar(gen+1, *maxGenerations, fmt.Sprintf("Token %d", record.TargetToken), stats)
 		}
 
@@ -618,12 +620,14 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 		to.harness.Generation = gen
 
 		if gen%10 == 0 || gen == *maxGenerations-1 {
-			bestMatch := 0
+			bestPrefix := 0
+			bestHamming := 0
 			if len(eliteSeeds) > 0 {
 				diff := eliteSeeds[0].HashOutput ^ uint32(targetToken)
-				bestMatch = bits.LeadingZeros32(diff)
+				bestPrefix = bits.LeadingZeros32(diff)
+				bestHamming = 32 - bits.OnesCount32(diff)
 			}
-			stats := fmt.Sprintf("fit=%.4f best=%d bits", pop.Fitness, bestMatch)
+			stats := fmt.Sprintf("fit=%.4f prefix=%d ham=%d", pop.Fitness, bestPrefix, bestHamming)
 			to.logger.ProgressBar(gen+1, *maxGenerations, fmt.Sprintf("Token %d", targetToken), stats)
 		}
 

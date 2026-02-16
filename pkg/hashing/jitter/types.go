@@ -47,8 +47,10 @@ type HashState struct {
 
 // NewHashState creates a new hash state for the temporal loop
 func NewHashState(header []byte, targetTokenID uint32) *HashState {
+	h := make([]byte, len(header))
+	copy(h, header)
 	return &HashState{
-		Header:        make([]byte, len(header)),
+		Header:        h,
 		Pass:          0,
 		JitterHistory: make([]JitterVector, 0, DefaultPassCount),
 		TargetTokenID: targetTokenID,

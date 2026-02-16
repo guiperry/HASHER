@@ -306,6 +306,15 @@ func (vm *uBPFVM) Execute21PassLoop(header []byte, targetTokenID uint32) (*jitte
 	return vm.jitterEngine.Execute21PassLoop(header, targetTokenID)
 }
 
+// Execute21PassLoopBatch executes the temporal loop for multiple headers in batch
+func (vm *uBPFVM) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*jitter.GoldenNonceResult, error) {
+	if !vm.loaded {
+		return nil, fmt.Errorf("eBPF not loaded")
+	}
+
+	return vm.jitterEngine.Execute21PassLoopBatch(headers, targetTokenID)
+}
+
 // LoadJitterTable loads a jitter table into the engine
 func (vm *uBPFVM) LoadJitterTable(table map[uint32]uint32) {
 	vm.jitterEngine.GetSearcher().LoadJitterTable(table)

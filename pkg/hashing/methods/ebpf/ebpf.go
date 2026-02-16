@@ -27,6 +27,11 @@ func (m *EbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 	return nil, fmt.Errorf("eBPF 21-pass loop not yet implemented - requires ASIC flash")
 }
 
+// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+func (m *EbpfMethod) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*core.JitterResult, error) {
+	return nil, fmt.Errorf("eBPF batch 21-pass loop not yet implemented - requires ASIC flash")
+}
+
 // ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
 func (m *EbpfMethod) ExecuteRecursiveMine(header []byte, passes int) ([]byte, error) {
 	return nil, fmt.Errorf("eBPF recursive mining not yet implemented - requires ASIC flash")

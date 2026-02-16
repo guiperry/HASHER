@@ -10,6 +10,7 @@ import (
 
 	"hasher/pkg/hashing/core"
 	"hasher/pkg/hashing/hardware"
+	"hasher/pkg/hashing/jitter"
 )
 
 // UbpfMethod implements the HashMethod interface for uBPF-based hashing
@@ -334,6 +335,29 @@ func (m *UbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		return nil, fmt.Errorf("21-pass loop failed: %w", err)
 	}
 
+	return m.convertJitterResult(result), nil
+}
+
+// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+func (m *UbpfMethod) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*core.JitterResult, error) {
+	if !m.initialized {
+		return nil, fmt.Errorf("uBPF method not initialized")
+	}
+
+	results, err := m.vm.Execute21PassLoopBatch(headers, targetTokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	coreResults := make([]*core.JitterResult, len(results))
+	for i, res := range results {
+		coreResults[i] = m.convertJitterResult(res)
+	}
+
+	return coreResults, nil
+}
+
+func (m *UbpfMethod) convertJitterResult(result *jitter.GoldenNonceResult) *core.JitterResult {
 	// Convert jitter result to core result
 	jitterVectors := make([]uint32, len(result.JitterVectors))
 	for i, jv := range result.JitterVectors {
@@ -348,10 +372,10 @@ func (m *UbpfMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		Stability:       result.Stability,
 		Alignment:       result.Alignment,
 		JitterVectors:   jitterVectors,
-		LatencyUs:       0, // TODO: Add timing
+		LatencyUs:       0,
 		Method:          m.Name(),
 		Metadata:        result.Metadata,
-	}, nil
+	}
 }
 
 // ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash

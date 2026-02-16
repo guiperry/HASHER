@@ -11,21 +11,25 @@ import (
 // CudaMethod implements the HashMethod interface for CUDA-accelerated hashing
 // This method is optimized for training pipeline only
 type CudaMethod struct {
-	bridge      *CudaBridge
-	mutex       sync.RWMutex
-	canon       *core.CanonicalSHA256
-	caps        *core.Capabilities
-	jitterTable map[uint32]uint32
+	bridge       *CudaBridge
+	mutex        sync.RWMutex
+	canon        *core.CanonicalSHA256
+	caps         *core.Capabilities
+	jitterTable  map[uint32]uint32
+	jitterEngine *jitter.JitterEngine
 }
 
 // NewCudaMethod creates a new CUDA hashing method
 func NewCudaMethod() *CudaMethod {
 	bridge := NewCudaBridge()
+	jitterConfig := jitter.DefaultJitterConfig()
+	jitterEngine := jitter.NewJitterEngine(jitterConfig)
 
 	return &CudaMethod{
-		bridge:      bridge,
-		canon:       core.NewCanonicalSHA256(),
-		jitterTable: make(map[uint32]uint32),
+		bridge:       bridge,
+		canon:        core.NewCanonicalSHA256(),
+		jitterTable:  make(map[uint32]uint32),
+		jitterEngine: jitterEngine,
 	}
 }
 
@@ -40,9 +44,18 @@ func (m *CudaMethod) IsAvailable() bool {
 		return false
 	}
 
-	// Check if CUDA is properly initialized
-	deviceCount := m.bridge.GetDeviceCount()
-	return deviceCount > 0
+	// Check if CUDA is properly initialized and driver is working
+	if m.bridge.GetDeviceCount() <= 0 {
+		return false
+	}
+
+	// Perform a smoke test to verify the driver and kernel
+	if err := m.bridge.SmokeTest(); err != nil {
+		fmt.Printf("[CUDA] Smoke test failed: %v. Falling back to software.\n", err)
+		return false
+	}
+
+	return true
 }
 
 // Initialize performs any necessary setup for the hashing method
@@ -260,21 +273,45 @@ func (m *CudaMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		return nil, fmt.Errorf("header must be exactly 80 bytes")
 	}
 
-	// Create jitter engine
-	jitterConfig := jitter.DefaultJitterConfig()
-	jitterEngine := jitter.NewJitterEngine(jitterConfig)
-	
-	// Load associative memory
-	jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
-	
-	jitterEngine.SetHashMethod(&CudaHashMethod{bridge: m.bridge})
+	// Set the hash method to use CUDA bridge
+	m.jitterEngine.SetHashMethod(&CudaHashMethod{bridge: m.bridge})
 
 	// Execute the 21-pass loop
-	result, err := jitterEngine.Execute21PassLoop(header, targetTokenID)
+	result, err := m.jitterEngine.Execute21PassLoop(header, targetTokenID)
 	if err != nil {
 		return nil, fmt.Errorf("21-pass loop failed: %w", err)
 	}
 
+	return m.convertJitterResult(result), nil
+}
+
+// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+func (m *CudaMethod) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*core.JitterResult, error) {
+	if !m.IsAvailable() {
+		return nil, fmt.Errorf("CUDA method not available")
+	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	m.jitterEngine.SetHashMethod(&CudaHashMethod{bridge: m.bridge})
+
+	// Use the optimized batch processing in jitter engine
+	results, err := m.jitterEngine.Execute21PassLoopBatch(headers, targetTokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert results
+	coreResults := make([]*core.JitterResult, len(results))
+	for i, res := range results {
+		coreResults[i] = m.convertJitterResult(res)
+	}
+
+	return coreResults, nil
+}
+
+func (m *CudaMethod) convertJitterResult(result *jitter.GoldenNonceResult) *core.JitterResult {
 	// Convert jitter result to core result
 	jitterVectors := make([]uint32, len(result.JitterVectors))
 	for i, jv := range result.JitterVectors {
@@ -292,7 +329,7 @@ func (m *CudaMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		LatencyUs:       0,
 		Method:          m.Name(),
 		Metadata:        result.Metadata,
-	}, nil
+	}
 }
 
 // LoadJitterTable loads associative memory for flash search jitter lookup
@@ -305,6 +342,7 @@ func (m *CudaMethod) LoadJitterTable(table map[uint32]uint32) error {
 		m.jitterTable[k] = v
 	}
 
+	m.jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
 	return nil
 }
 

@@ -13,7 +13,9 @@ import (
 
 	"github.com/lab/hasher/data-trainer/internal/config"
 	"github.com/lab/hasher/data-trainer/pkg/simulator"
+	"hasher/pkg/hashing/core"
 	"hasher/pkg/hashing/hardware"
+	"hasher/pkg/hashing/methods/cuda"
 )
 
 const (
@@ -79,8 +81,8 @@ func (tr *TrainingRecord) BuildBitcoinHeader(nonce uint32) []byte {
 	// Bytes 72-76: Bits (Little-Endian)
 	binary.LittleEndian.PutUint32(header[72:76], BitcoinBits)
 
-	// Bytes 76-80: Nonce (Little-Endian) - The target we're hunting for
-	binary.LittleEndian.PutUint32(header[76:80], nonce)
+	// Bytes 76-80: Nonce (Big-Endian for SHA-256 word alignment)
+	binary.BigEndian.PutUint32(header[76:80], nonce)
 
 	return header
 }
@@ -124,7 +126,7 @@ func (tr *TrainingRecord) BuildHeaderBatch(nonces []uint32) [][]byte {
 	for i, nonce := range nonces {
 		header := make([]byte, 80)
 		copy(header[:76], staticHeader)
-		binary.LittleEndian.PutUint32(header[76:80], nonce)
+		binary.BigEndian.PutUint32(header[76:80], nonce)
 		headers[i] = header
 	}
 
@@ -344,13 +346,8 @@ func NewEvolutionaryHarness(populationSize int) *EvolutionaryHarness {
 }
 
 // UpdateDifficulty scales the difficulty mask based on the current epoch
-// Starts at DefaultDifficultyBits and increases over epochs
 func (eh *EvolutionaryHarness) UpdateDifficulty(epoch int) {
 	eh.Epoch = epoch
-
-	// Base bits at epoch 1 = DefaultDifficultyBits (default: 12)
-	// Target bits at epoch 10 = 24
-	// Increment: ~1.33 bits per epoch
 
 	targetBits := config.DefaultDifficultyBits + int(float64(epoch-1)*1.33)
 	if targetBits > config.MaxDifficultyBits {
@@ -360,61 +357,15 @@ func (eh *EvolutionaryHarness) UpdateDifficulty(epoch int) {
 		targetBits = config.MinDifficultyBits
 	}
 
-	// Create mask using lookup to avoid overflow issues
+	// Create mask using bit-shift (for Big-Endian comparison)
 	var mask uint32
-	switch targetBits {
-	case 8:
-		mask = 0xFF000000
-	case 9:
-		mask = 0xFF800000
-	case 10:
-		mask = 0xFFC00000
-	case 11:
-		mask = 0xFFE00000
-	case 12:
-		mask = 0xFFF00000
-	case 13:
-		mask = 0xFFF80000
-	case 14:
-		mask = 0xFFFC0000
-	case 15:
-		mask = 0xFFFE0000
-	case 16:
-		mask = 0xFFFF0000
-	case 17:
-		mask = 0xFFFF8000
-	case 18:
-		mask = 0xFFFFC000
-	case 19:
-		mask = 0xFFFFE000
-	case 20:
-		mask = 0xFFFFF000
-	case 21:
-		mask = 0xFFFFF800
-	case 22:
-		mask = 0xFFFFFC00
-	case 23:
-		mask = 0xFFFFFE00
-	case 24:
-		mask = 0xFFFFFF00
-	case 25:
-		mask = 0xFFFFFF80
-	case 26:
-		mask = 0xFFFFFFC0
-	case 27:
-		mask = 0xFFFFFFE0
-	case 28:
-		mask = 0xFFFFFFF0
-	case 29:
-		mask = 0xFFFFFFF8
-	case 30:
-		mask = 0xFFFFFFFC
-	case 31:
-		mask = 0xFFFFFFFE
-	case 32:
+	if targetBits >= 32 {
 		mask = 0xFFFFFFFF
-	default:
-		mask = 0xFFF00000 // Default to 12 bits
+	} else if targetBits <= 0 {
+		mask = 0
+	} else {
+		// e.g. 4 bits = 0xF0000000
+		mask = ^uint32(0) << (32 - targetBits)
 	}
 
 	eh.DifficultyMask = mask
@@ -437,42 +388,23 @@ func (eh *EvolutionaryHarness) calculateAlignmentReward(goldenNonce uint32, targ
 		return 1.0
 	}
 
-	// Prefix matching: reward based on leading bits that match (like ASIC difficulty)
-	// XOR gives us the bits that differ, LeadingZeros32 tells us how many MSBs match
-	diff := goldenNonce ^ uint32(targetToken)
-	matchingBits := bits.LeadingZeros32(diff)
+	// Calculate bit-wise similarity (Hamming similarity)
+	xor := goldenNonce ^ uint32(targetToken)
+	matchingBits := 32 - bits.OnesCount32(xor)
 
-	// Calculate how many bits past the difficulty threshold
-	difficultyBits := 32 - bits.Len32(eh.DifficultyMask)
-	bitsAboveThreshold := matchingBits - difficultyBits
-
-	// REWARD SCHEME: Clear separation between "winning" and "not winning"
-	if matchingBits >= int(difficultyBits) {
-		// Passing the difficulty threshold - give high reward that increases with margin
-		// 16 bits on 16-bit difficulty = 0.85 (clear winner)
-		// 24 bits on 16-bit difficulty = 1.0 (exceptional)
-		baseReward := 0.85
-		if bitsAboveThreshold > 0 {
-			additional := float64(bitsAboveThreshold) / float64(32-difficultyBits) * 0.15
-			return baseReward + additional
-		}
-		return baseReward
+	// Continuous gradient: even 1 bit match gives some reward
+	// Max reward for matching all targetBits is 0.85
+	reward := (float64(matchingBits) / 32.0) * 0.85
+	if reward == 0 {
+		reward = 0.001 // Tiny base reward to prevent flat advantage
 	}
 
-	// Below difficulty threshold - much lower rewards to create clear gradient
-	if matchingBits >= 12 {
-		// Close but not passing - give partial reward
-		return 0.3 + 0.3*float64(matchingBits-12)/4.0
-	} else if matchingBits >= 8 {
-		// Moderate prefix - smaller reward
-		return 0.1 + 0.2*float64(matchingBits-8)/4.0
-	} else if matchingBits >= 4 {
-		// Weak prefix - tiny reward
-		return 0.02 + 0.08*float64(matchingBits-4)/4.0
+	// Bonus for passing the threshold (prefix matching)
+	if eh.IsWinningSeed(goldenNonce, uint32(targetToken)) {
+		reward += 0.10
 	}
 
-	// No meaningful prefix - essentially noise
-	return float64(matchingBits) / 32.0 * 0.02
+	return reward
 }
 
 func (eh *EvolutionaryHarness) calculateFormatReward(goldenNonce uint32, tokenToken int32, tokenMap map[int32]bool) float64 {
@@ -524,7 +456,9 @@ func (eh *EvolutionaryHarness) calculateStabilityReward(seed []byte, sim simulat
 	variance /= 5
 
 	// Convert variance to stability reward (lower variance = higher reward)
-	maxVariance := 1000000.0 // Maximum expected variance
+	// For 32-bit hashes, a "stable" result might still have some variance
+	// Use a very large maxVariance to provide a gradual reward
+	var maxVariance float64 = 0xFFFFFFFF * 0xFFFFFFFF / 12.0 
 	stability := 1.0 - (variance / maxVariance)
 	if stability < 0 {
 		stability = 0
@@ -602,9 +536,10 @@ func (eh *EvolutionaryHarness) CalculateBitMatchAdvantage(results []SeedResult, 
 	var totalScore float64
 
 	for i, res := range results {
-		// Count leading bits that match the target
-		diff := res.HashOutput ^ uint32(targetToken)
-		matchingBits := bits.LeadingZeros32(diff)
+		// Use total matching bits (Hamming similarity) for the gradient
+		xor := res.HashOutput ^ uint32(targetToken)
+		matchingBits := 32 - bits.OnesCount32(xor)
+		
 		// Normalize to 0-1 range
 		bitScores[i] = float64(matchingBits) / 32.0
 		totalScore += bitScores[i]
@@ -623,11 +558,12 @@ func (eh *EvolutionaryHarness) CalculateBitMatchAdvantage(results []SeedResult, 
 		if stdDev > 0 {
 			results[i].Advantage = (bitScores[i] - mean) / stdDev
 		} else {
-			results[i].Advantage = bitScores[i] - mean
+			results[i].Advantage = 0 // Neutral advantage if no variance
 		}
-		// Boost advantage for seeds that pass difficulty mask
+		
+		// Boost advantage for seeds that pass the actual difficulty threshold (prefix match)
 		if eh.IsWinningSeed(results[i].HashOutput, uint32(targetToken)) {
-			results[i].Advantage += 2.0 // Significant boost for passing difficulty
+			results[i].Advantage += 2.0 
 		}
 	}
 
@@ -671,22 +607,28 @@ func (eh *EvolutionaryHarness) SelectAndMutate(results []SeedResult, currentSeed
 	newGeneration := make(map[uint32][]byte)
 	topCount := int(float64(len(results)) * eh.EliteRatio)
 
+	// Keep elites and their mutations
 	for i := 0; i < len(results); i++ {
 		seedID := results[i].SeedID
-		if _, exists := currentSeeds[seedID]; exists {
+		if originalSeed, exists := currentSeeds[seedID]; exists {
 			if i < topCount {
-				originalSeed := currentSeeds[seedID]
+				// 1. Keep the elite itself
 				newGeneration[seedID] = originalSeed
 
+				// 2. Create a mutation of this elite
 				if len(newGeneration) < eh.PopulationSize {
 					mutatedID := uint32(eh.rand.Intn(1000000))
-					mutatedSeed := eh.BitwiseMutation(originalSeed, results[i].Advantage)
+					mutatedSeed := eh.BitcoinAwareMutate(originalSeed, results[i].Advantage)
 					newGeneration[mutatedID] = mutatedSeed
 				}
 			}
 		}
+		if len(newGeneration) >= eh.PopulationSize {
+			break
+		}
 	}
 
+	// Fill remaining with random seeds to maintain diversity
 	for len(newGeneration) < eh.PopulationSize {
 		seedID := uint32(eh.rand.Intn(1000000))
 		newGeneration[seedID] = GenerateRandomSeed()
@@ -713,18 +655,29 @@ func (eh *EvolutionaryHarness) BitcoinAwareMutate(seed []byte, advantage float64
 	nonceMutationRate := int(mutationRate * 0.7) // 70% focus on nonce
 	seedMutationRate := int(mutationRate * 0.3)  // 30% on rest of seed
 
-	// Mutate nonce bytes (last 4 bytes) more aggressively
-	for i := 0; i < nonceMutationRate; i++ {
-		byteIdx := len(mutated) - 4 - eh.rand.Intn(4) // Last 4 bytes
-		bitIdx := uint(eh.rand.Intn(8))
-		mutated[byteIdx] ^= (1 << bitIdx)
-	}
+	if len(mutated) >= 4 {
+		// Mutate nonce bytes (last 4 bytes) more aggressively
+		for i := 0; i < nonceMutationRate; i++ {
+			byteIdx := len(mutated) - 4 + eh.rand.Intn(4) // Corrected: len-4 + [0,3]
+			bitIdx := uint(eh.rand.Intn(8))
+			mutated[byteIdx] ^= (1 << bitIdx)
+		}
 
-	// Mutate remaining bytes normally
-	for i := 0; i < seedMutationRate; i++ {
-		byteIdx := eh.rand.Intn(len(mutated) - 4) // Exclude nonce bytes
-		bitIdx := uint(eh.rand.Intn(8))
-		mutated[byteIdx] ^= (1 << bitIdx)
+		// Mutate remaining bytes normally
+		if len(mutated) > 4 {
+			for i := 0; i < seedMutationRate; i++ {
+				byteIdx := eh.rand.Intn(len(mutated) - 4) // Exclude nonce bytes
+				bitIdx := uint(eh.rand.Intn(8))
+				mutated[byteIdx] ^= (1 << bitIdx)
+			}
+		}
+	} else {
+		// Small seed fallback
+		for i := 0; i < int(mutationRate); i++ {
+			byteIdx := eh.rand.Intn(len(mutated))
+			bitIdx := uint(eh.rand.Intn(8))
+			mutated[byteIdx] ^= (1 << bitIdx)
+		}
 	}
 
 	return mutated
@@ -771,7 +724,7 @@ func (eh *EvolutionaryHarness) findBestNonce(population *SeedPopulation) uint32 
 	bestNonce := uint32(0)
 	for _, seed := range population.Seeds {
 		if len(seed) >= 4 {
-			bestNonce = binary.LittleEndian.Uint32(seed[len(seed)-4:])
+			bestNonce = binary.BigEndian.Uint32(seed[len(seed)-4:])
 			break
 		}
 	}
@@ -785,7 +738,7 @@ func (eh *EvolutionaryHarness) generateCryptoNonce() uint32 {
 	hasher := sha256.New()
 	hasher.Write(seed)
 	hash := hasher.Sum(nil)
-	return binary.LittleEndian.Uint32(hash[:4])
+	return binary.BigEndian.Uint32(hash[:4])
 }
 
 func (eh *EvolutionaryHarness) BitwiseMutation(seed []byte, advantage float64) []byte {
@@ -818,8 +771,8 @@ func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, re
 
 	for seedID, seed := range population.Seeds {
 		seedIDs = append(seedIDs, seedID)
-		// Extract nonce from last 4 bytes of seed
-		nonce := binary.LittleEndian.Uint32(seed[len(seed)-4:])
+		// Extract nonce from last 4 bytes of seed (Big-Endian)
+		nonce := binary.BigEndian.Uint32(seed[len(seed)-4:])
 		candidateNonces = append(candidateNonces, nonce)
 	}
 
@@ -828,15 +781,13 @@ func (eh *EvolutionaryHarness) EvaluatePopulation(population *SeedPopulation, re
 		return nil, err
 	}
 
-	// Calculate population fitness
-	var totalFitness float64
+	// Calculate population fitness (mean reward)
+	var totalReward float64
 	for _, res := range results {
-		if res.Advantage > 0 {
-			totalFitness += res.Reward
-		}
+		totalReward += res.Reward
 	}
 	if len(results) > 0 {
-		population.Fitness = totalFitness / float64(len(results))
+		population.Fitness = totalReward / float64(len(results))
 	}
 
 	return results, nil
@@ -863,40 +814,64 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 	// Generate Bitcoin headers for all candidate nonces in batch
 	headers := hwPrep.PrepareAsicJobBatch(slots, candidateNonces)
 
-	// Evaluate each header
-	for i, header := range headers {
+	// Use HasherWrapper's batch processing if available
+	var loopResults []*core.JitterResult
+	var batchErr error
+
+	if hWrap, ok := sim.(*simulator.HasherWrapper); ok {
+		// Debug logging for the first batch of the first generation
+		if population.Generation == 0 {
+			if cMethod, ok := hWrap.GetHashMethod().(*cuda.CudaMethod); ok {
+				fmt.Printf("[DEBUG] %s\n", cMethod.GetBridge().DebugHeaders(headers))
+			}
+		}
+		// Use the optimized batch processing
+		loopResults, batchErr = hWrap.GetHashMethod().Execute21PassLoopBatch(headers, uint32(record.TargetToken))
+	} else {
+		// Fallback to sequential if not HasherWrapper
+		loopResults = make([]*core.JitterResult, len(headers))
+		for i, header := range headers {
+			res, err := sim.RecursiveMine(header, 21)
+			if err != nil {
+				batchErr = err
+				break
+			}
+			loopResults[i] = &core.JitterResult{
+				FinalHash: [32]byte(res), // Unsafe cast but for fallback only
+			}
+		}
+	}
+
+	if batchErr != nil {
+		return nil, fmt.Errorf("batch processing failed: %w", batchErr)
+	}
+
+	// Process results
+	for i, loopRes := range loopResults {
 		// Reconstruct seed from original seeds
-		seed := population.Seeds[seedIDs[i]]
+		originalSeed := population.Seeds[seedIDs[i]]
 
 		result := &SeedResult{
-			Seed:   make([]byte, len(seed)),
 			SeedID: seedIDs[i],
+			Seed:   make([]byte, len(originalSeed)),
 		}
-		copy(result.Seed, seed)
+		copy(result.Seed, originalSeed)
 
-		// Perform 21-pass temporal loop using RecursiveMine (Pathfinder logic)
-		// This invokes the Jitter RPC for associative nudging
-		finalHash, err := sim.RecursiveMine(header, 21)
-		if err != nil {
-			eh.logError("RecursiveMine failed for seed %d: %v", seedIDs[i], err)
-			result.Reward = 0.0
-			results[i] = *result
-			continue
-		}
-
-		// The user wants the Double-SHA256 hashed result to be used as the final Seed
-		result.Seed = make([]byte, len(finalHash))
-		copy(result.Seed, finalHash)
-
+		finalHash := loopRes.FinalHash
 		// The golden nonce is first 4 bytes of final Double-SHA256 for bit-matching
 		goldenNonce := binary.BigEndian.Uint32(finalHash[:4])
+
+		if i == 0 && population.Generation == 0 {
+			fmt.Printf("[DEBUG] Token %d: Target=0x%08X Hash[0]=0x%08X Mask=0x%08X\n", 
+				record.TargetToken, uint32(record.TargetToken), goldenNonce, eh.DifficultyMask)
+		}
 
 		// Store hash output for bit-matching
 		result.HashOutput = goldenNonce
 
 		// Calculate rewards
 		result.Alignment = eh.calculateAlignmentReward(goldenNonce, record.TargetToken, tokenMap)
-		result.Stability = eh.calculateStabilityReward(seed, sim)
+		result.Stability = eh.calculateStabilityReward(result.Seed, sim)
 		result.Format = eh.calculateFormatReward(goldenNonce, record.TargetToken, tokenMap)
 
 		// Bonus for exact target match
@@ -911,6 +886,15 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 
 	// Calculate advantages using bit-match scores (provides gradient despite SHA-256 avalanche)
 	results = eh.CalculateBitMatchAdvantage(results, record.TargetToken)
+
+	// Calculate population fitness (mean reward)
+	var totalReward float64
+	for _, res := range results {
+		totalReward += res.Reward
+	}
+	if len(results) > 0 {
+		population.Fitness = totalReward / float64(len(results))
+	}
 
 	return results, nil
 }

@@ -11,18 +11,21 @@ import (
 
 // SoftwareMethod implements the HashMethod interface for pure software hashing
 type SoftwareMethod struct {
-	initialized bool
-	mutex       sync.RWMutex
-	canon       *core.CanonicalSHA256
-	caps        *core.Capabilities
-	jitterTable map[uint32]uint32
+	initialized  bool
+	mutex        sync.RWMutex
+	canon        *core.CanonicalSHA256
+	caps         *core.Capabilities
+	jitterTable  map[uint32]uint32
+	jitterEngine *jitter.JitterEngine
 }
 
 // NewSoftwareMethod creates a new software hashing method
 func NewSoftwareMethod() *SoftwareMethod {
+	jitterConfig := jitter.DefaultJitterConfig()
 	return &SoftwareMethod{
-		canon:       core.NewCanonicalSHA256(),
-		jitterTable: make(map[uint32]uint32),
+		canon:        core.NewCanonicalSHA256(),
+		jitterTable:  make(map[uint32]uint32),
+		jitterEngine: jitter.NewJitterEngine(jitterConfig),
 	}
 }
 
@@ -153,22 +156,40 @@ func (m *SoftwareMethod) Execute21PassLoop(header []byte, targetTokenID uint32) 
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	// Create jitter engine for this method
-	jitterConfig := jitter.DefaultJitterConfig()
-	jitterEngine := jitter.NewJitterEngine(jitterConfig)
-	
-	// Load associative memory
-	m.populateSearcher(jitterEngine)
-
-	// Set the hash method to use our software implementation
-	jitterEngine.SetHashMethod(&SoftwareHashMethod{})
-
 	// Execute the 21-pass loop
-	result, err := jitterEngine.Execute21PassLoop(header, targetTokenID)
+	result, err := m.jitterEngine.Execute21PassLoop(header, targetTokenID)
 	if err != nil {
 		return nil, fmt.Errorf("21-pass loop failed: %w", err)
 	}
 
+	return m.convertJitterResult(result), nil
+}
+
+// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+func (m *SoftwareMethod) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*core.JitterResult, error) {
+	if !m.initialized {
+		return nil, fmt.Errorf("software method not initialized")
+	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Use the optimized batch processing in jitter engine
+	results, err := m.jitterEngine.Execute21PassLoopBatch(headers, targetTokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert results
+	coreResults := make([]*core.JitterResult, len(results))
+	for i, res := range results {
+		coreResults[i] = m.convertJitterResult(res)
+	}
+
+	return coreResults, nil
+}
+
+func (m *SoftwareMethod) convertJitterResult(result *jitter.GoldenNonceResult) *core.JitterResult {
 	// Convert jitter result to core result
 	jitterVectors := make([]uint32, len(result.JitterVectors))
 	for i, jv := range result.JitterVectors {
@@ -183,10 +204,10 @@ func (m *SoftwareMethod) Execute21PassLoop(header []byte, targetTokenID uint32) 
 		Stability:       result.Stability,
 		Alignment:       result.Alignment,
 		JitterVectors:   jitterVectors,
-		LatencyUs:       0, // TODO: Add timing
+		LatencyUs:       0,
 		Method:          m.Name(),
 		Metadata:        result.Metadata,
-	}, nil
+	}
 }
 
 // ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
@@ -242,6 +263,7 @@ func (m *SoftwareMethod) LoadJitterTable(table map[uint32]uint32) error {
 		m.jitterTable[k] = v
 	}
 
+	m.populateSearcher(m.jitterEngine)
 	return nil
 }
 

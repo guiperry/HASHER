@@ -66,12 +66,29 @@ func NewCudaBridge() *CudaBridge {
 	}
 
 	// Check if CUDA library is available by trying to load it
-	// The library will be loaded automatically by the linker due to #cgo LDFLAGS
-	// We just need to verify GPU is available
-	bridge.deviceCount = 1 // We'll verify via nvidia-smi check
+	bridge.deviceCount = 1
 	bridge.initialized = true
 
 	return bridge
+}
+
+// SmokeTest performs a test hash to verify the CUDA driver and kernel are working
+func (cb *CudaBridge) SmokeTest() error {
+	if !cb.initialized {
+		return fmt.Errorf("CUDA not initialized")
+	}
+
+	testHeader := make([]byte, 80)
+	for i := range testHeader {
+		testHeader[i] = byte(i)
+	}
+
+	_, err := cb.ComputeDoubleHashFull([][]byte{testHeader})
+	if err != nil {
+		return fmt.Errorf("CUDA smoke test failed: %w", err)
+	}
+
+	return nil
 }
 
 // GetDeviceCount returns the number of available CUDA devices
@@ -154,6 +171,15 @@ func (cb *CudaBridge) ProcessSingleHeader(header []byte, targetTokenID uint32) (
 	}
 
 	return 0, fmt.Errorf("no match found")
+}
+
+// DebugHeaders returns a string representation of the constructed headers for a batch
+func (cb *CudaBridge) DebugHeaders(headers [][]byte) string {
+	if len(headers) == 0 {
+		return "Empty batch"
+	}
+	h := headers[0]
+	return fmt.Sprintf("Header[0] (%d bytes): %x", len(h), h)
 }
 
 // ComputeDoubleHashFull processes multiple 80-byte headers and returns full 32-byte hashes

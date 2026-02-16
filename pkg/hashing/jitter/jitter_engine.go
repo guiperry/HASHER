@@ -18,6 +18,14 @@ type JitterEngine struct {
 
 	// Hash method for performing SHA-256 operations
 	hashMethod HashMethod
+
+	// Persistent RPC connection (optional)
+	rpcConn net.Conn
+}
+
+// SetRPCConnection allows providing a persistent connection to the Jitter RPC server
+func (je *JitterEngine) SetRPCConnection(conn net.Conn) {
+	je.rpcConn = conn
 }
 
 // HashMethod defines the interface for performing hash operations
@@ -91,11 +99,16 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 	passResults := make([]TemporalPassResult, 0, je.config.PassCount)
 	appliedJitters := make([]JitterVector, 0, je.config.PassCount)
 
-	// Attempt to connect to Jitter RPC Server for high-speed associative memory
+	// Use persistent connection if available, otherwise dial
 	var rpcConn net.Conn
 	var rpcErr error
-	if je.config.JitterSocketPath != "" {
+	shouldClose := false
+
+	if je.rpcConn != nil {
+		rpcConn = je.rpcConn
+	} else if je.config.JitterSocketPath != "" {
 		rpcConn, rpcErr = net.Dial("unix", je.config.JitterSocketPath)
+		shouldClose = true
 	}
 
 	// Execute each pass
@@ -105,7 +118,7 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		// Step 1: Hash the current state
 		hash, err := je.hashMethod.ComputeDoubleHash(state.Header)
 		if err != nil {
-			if rpcConn != nil {
+			if rpcConn != nil && shouldClose {
 				rpcConn.Close()
 			}
 			return nil, fmt.Errorf("hash computation failed at pass %d: %w", pass, err)
@@ -172,7 +185,7 @@ func (je *JitterEngine) Execute21PassLoop(header []byte, targetTokenID uint32) (
 		}
 	}
 
-	if rpcConn != nil {
+	if rpcConn != nil && shouldClose {
 		rpcConn.Close()
 	}
 
@@ -235,9 +248,23 @@ func (je *JitterEngine) getJitterRPC(conn net.Conn, slots [12]uint32, hash uint3
 }
 
 // Execute21PassLoopBatch processes multiple headers in batch
-// Optimized for GPU acceleration when available
+// Optimized for GPU acceleration and persistent connections
 func (je *JitterEngine) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*GoldenNonceResult, error) {
 	results := make([]*GoldenNonceResult, len(headers))
+
+	// Establish persistent connection for the batch
+	var rpcConn net.Conn
+	var rpcErr error
+	if je.rpcConn != nil {
+		rpcConn = je.rpcConn
+	} else if je.config.JitterSocketPath != "" {
+		rpcConn, rpcErr = net.Dial("unix", je.config.JitterSocketPath)
+		if rpcErr == nil {
+			defer rpcConn.Close()
+			je.SetRPCConnection(rpcConn)
+			defer je.SetRPCConnection(nil)
+		}
+	}
 
 	for i, header := range headers {
 		result, err := je.Execute21PassLoop(header, targetTokenID)

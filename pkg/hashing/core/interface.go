@@ -33,6 +33,9 @@ type HashMethod interface {
 	// This is the core mechanism for dynamic associative hashing
 	Execute21PassLoop(header []byte, targetTokenID uint32) (*JitterResult, error)
 
+	// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+	Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*JitterResult, error)
+
 	// ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
 	// This represents the final 'Golden Seed' discovered by the pathfinder
 	ExecuteRecursiveMine(header []byte, passes int) ([]byte, error)

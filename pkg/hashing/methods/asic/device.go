@@ -10,10 +10,11 @@ import (
 
 // ASICMethod implements the HashMethod interface for direct ASIC hardware hashing
 type ASICMethod struct {
-	client      *ASICClient
-	mutex       sync.RWMutex
-	caps        *core.Capabilities
-	jitterTable map[uint32]uint32
+	client       *ASICClient
+	mutex        sync.RWMutex
+	caps         *core.Capabilities
+	jitterTable  map[uint32]uint32
+	jitterEngine *jitter.JitterEngine
 }
 
 // NewASICMethod creates a new ASIC hashing method
@@ -24,9 +25,11 @@ func NewASICMethod(address string) *ASICMethod {
 		fmt.Printf("Warning: Failed to connect to ASIC, using fallback: %v\n", err)
 	}
 
+	jitterConfig := jitter.DefaultJitterConfig()
 	method := &ASICMethod{
-		client:      client,
-		jitterTable: make(map[uint32]uint32),
+		client:       client,
+		jitterTable:  make(map[uint32]uint32),
+		jitterEngine: jitter.NewJitterEngine(jitterConfig),
 	}
 
 	// Initialize capabilities
@@ -244,6 +247,36 @@ func (m *ASICMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		return nil, fmt.Errorf("21-pass loop failed: %w", err)
 	}
 
+	return m.convertJitterResult(result), nil
+}
+
+// Execute21PassLoopBatch runs the temporal loop for multiple headers in batch
+func (m *ASICMethod) Execute21PassLoopBatch(headers [][]byte, targetTokenID uint32) ([]*core.JitterResult, error) {
+	if m.client == nil {
+		return nil, fmt.Errorf("ASIC client not initialized")
+	}
+
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	m.jitterEngine.SetHashMethod(&ASICHASHMethod{client: m.client})
+
+	// Use the optimized batch processing in jitter engine
+	results, err := m.jitterEngine.Execute21PassLoopBatch(headers, targetTokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert results
+	coreResults := make([]*core.JitterResult, len(results))
+	for i, res := range results {
+		coreResults[i] = m.convertJitterResult(res)
+	}
+
+	return coreResults, nil
+}
+
+func (m *ASICMethod) convertJitterResult(result *jitter.GoldenNonceResult) *core.JitterResult {
 	// Convert jitter result to core result
 	jitterVectors := make([]uint32, len(result.JitterVectors))
 	for i, jv := range result.JitterVectors {
@@ -258,10 +291,10 @@ func (m *ASICMethod) Execute21PassLoop(header []byte, targetTokenID uint32) (*co
 		Stability:       result.Stability,
 		Alignment:       result.Alignment,
 		JitterVectors:   jitterVectors,
-		LatencyUs:       0, // TODO: Add timing
+		LatencyUs:       0,
 		Method:          m.Name(),
 		Metadata:        result.Metadata,
-	}, nil
+	}
 }
 
 // ExecuteRecursiveMine runs the complete 21-pass temporal loop and returns the full 32-byte hash
@@ -302,6 +335,7 @@ func (m *ASICMethod) LoadJitterTable(table map[uint32]uint32) error {
 		m.jitterTable[k] = v
 	}
 
+	m.jitterEngine.GetSearcher().LoadJitterTable(m.jitterTable)
 	return nil
 }
 

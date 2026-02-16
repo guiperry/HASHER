@@ -9,6 +9,8 @@ HASHER implements a recursive single-ASIC inference engine as specified in the *
 
 **Updated Algorithm:** The system now uses the ASIC as a **deterministic bucket generator** rather than a generic hash function. By setting a "Difficulty 1" target, we use the first valid Nonce discovered as the LSH (Locality Sensitive Hashing) signature, maintaining the 500 GH/s speed advantage by repurposing the mining hardware's natural state.
 
+**Training Innovation:** Discovery of "Golden Seeds" is now optimized using a **Hamming Similarity Gradient** in the evolutionary process. Instead of binary prefix matching, the system rewards total matching bits across the 32-bit word, providing a continuous signal for convergence even at high difficulties.
+
 ## Key Features
 
 ### 1. Hash-Based Neural Network

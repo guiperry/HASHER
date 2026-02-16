@@ -73,6 +73,7 @@ func (h *HasherWrapper) Initialize(config *SimulatorConfig) error {
 		if err := h.hashMethod.Initialize(); err != nil {
 			return fmt.Errorf("failed to initialize hash method: %w", err)
 		}
+		fmt.Printf("[SIM] Using hash method: %s\n", h.hashMethod.Name())
 	}
 
 	h.isRunning = true

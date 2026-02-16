@@ -3,11 +3,11 @@ package config
 // DefaultDifficultyBits is the centralized default difficulty setting
 // This controls how many leading bits must match for a winning seed
 // Lower = faster training, Higher = more selective
-const DefaultDifficultyBits = 4
+const DefaultDifficultyBits = 12
 
 // MinDifficultyBits and MaxDifficultyBits define valid ranges
 const (
-	MinDifficultyBits = 4
+	MinDifficultyBits = 12
 	MaxDifficultyBits = 32
 )
 

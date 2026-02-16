@@ -144,19 +144,26 @@ type TrainingRecord struct {
 
 For each target token, the system:
 
-1. **Group Sampling**: Creates population of candidate seeds (64-128)
-2. **Parallel Evaluation**: Executes 21-pass SHA-256 recursion on GPU
-3. **Reward Calculation**: Evaluates alignment, stability, and format
-4. **Advantage Computation**: Calculates relative performance against group mean
-5. **Selection & Mutation**: Keeps elite 25% and generates mutated offspring
+1. **Group Sampling**: Creates population of candidate seeds (64-256)
+2. **Parallel Evaluation**: Executes 21-pass SHA-256 recursion on GPU or via optimized software fallback
+3. **Reward Calculation**: Evaluates alignment (Hamming-based), stability, and format
+4. **Advantage Computation**: Calculates relative performance using **Hamming Similarity Gradient** (total matching bits) instead of just leading zeros
+5. **Selection & Mutation**: Keeps elite 25% and generates **Bitcoin-Aware** mutated offspring focusing on the nonce field
 
 ### 3. Reward Function
 
 The reward system combines three components:
 
-- **Alignment Reward** (60%): Golden Nonce matches target token lookup
-- **Stability Reward** (30%): Hamming distance between pass 20 and 21
-- **Format Reward** (10%): Nonce resolves to valid token_map entry
+- **Alignment Reward**: Uses **Hamming Similarity** (count of all 32 matching bits) to provide a continuous gradient for evolution. A prefix-match bonus is applied when the difficulty threshold is met.
+- **Stability Reward**: Measure of convergence consistency across the final passes of the 21-pass temporal loop.
+- **Format Reward**: Nonce resolves to a valid entry in the token map.
+
+### 4. Key Improvements (v1.1)
+
+- **Hamming Gradient**: Replaced binary "all-or-nothing" prefix matching with bit-wise Hamming similarity, allowing the evolutionary process to "learn" from partial matches.
+- **Big-Endian Synchronization**: Unified all components (Jitter, CUDA, ASIC) to use **Big-Endian** word extraction, ensuring hash leading bits correctly align with token IDs.
+- **Persistent Jitter RPC**: Performance optimized to reuse a single Unix socket connection for entire population batches, reducing syscall overhead by over 99%.
+- **Header Isolation**: Added mandatory cloning of Bitcoin headers per seed to prevent state leakage during the 21-pass modification loop.
 
 ### 4. Checkpointing
 
