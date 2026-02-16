@@ -258,31 +258,39 @@ func shutdownHasherHost(cmd *exec.Cmd, started bool, port int) {
 
 // shutdownPipelineProcess gracefully shuts down a running pipeline stage process
 func shutdownPipelineProcess(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
+	// First try to kill by command if available
+	if cmd != nil && cmd.Process != nil {
+		fmt.Println("Shutting down pipeline process...")
+
+		// Try graceful SIGTERM first
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			// If SIGTERM fails, try SIGKILL
+			fmt.Println("Pipeline process SIGTERM failed, force killing...")
+			cmd.Process.Kill()
+		} else {
+			// Wait for process to terminate with timeout
+			done := make(chan error, 1)
+			go func() {
+				done <- cmd.Wait()
+			}()
+
+			select {
+			case <-done:
+				fmt.Println("Pipeline process shut down successfully.")
+				return
+			case <-time.After(5 * time.Second):
+				fmt.Println("Pipeline process shutdown timeout, force killing...")
+				cmd.Process.Kill()
+			}
+		}
 	}
 
-	fmt.Println("Shutting down pipeline process...")
-
-	// Try graceful SIGTERM first
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		// If SIGTERM fails, try SIGKILL
-		fmt.Println("Pipeline process SIGTERM failed, force killing...")
-		cmd.Process.Kill()
-		return
-	}
-
-	// Wait for process to terminate with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case <-done:
-		fmt.Println("Pipeline process shut down successfully.")
-	case <-time.After(5 * time.Second):
-		fmt.Println("Pipeline process shutdown timeout, force killing...")
-		cmd.Process.Kill()
+	// Fallback: also kill any running pipeline binaries by name
+	pipelineBinaries := []string{"data-miner", "data-encoder", "data-trainer"}
+	for _, bin := range pipelineBinaries {
+		// Try to find and kill the process
+		exec.Command("pkill", "-TERM", "-f", bin).Run()
+		time.Sleep(100 * time.Millisecond)
+		exec.Command("pkill", "-KILL", "-f", bin).Run()
 	}
 }

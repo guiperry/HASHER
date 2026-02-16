@@ -486,7 +486,7 @@ func NewModel() Model {
 			{
 				Name:    "data-trainer",
 				BinName: "data-trainer",
-				Args:    []string{"-verbose", "-epochs", "5", "-sequential"},
+				Args:    []string{"-verbose", "-epochs", "5", "-sequential", "-hash-method", "cuda"},
 				Desc:    "Data Trainer - Neural network training",
 			},
 		},
@@ -702,6 +702,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.PipelineLogs = append(m.PipelineLogs, msg.Log)
 		if len(m.PipelineLogs) > 100 {
 			m.PipelineLogs = m.PipelineLogs[len(m.PipelineLogs)-100:]
+		}
+
+		// Update stage name when a stage starts
+		if msg.Stage != "" {
+			m.PipelineStage = msg.Stage
 		}
 
 		if msg.Complete {
@@ -2408,6 +2413,7 @@ func (m Model) runPipelineStage(binDir string, stageIndex int) tea.Cmd {
 		return PipelineLogMsg{
 			Log:        logMsg,
 			StageIndex: stageIndex,
+			Stage:      stage.Name,
 		}
 	}
 }
@@ -2633,6 +2639,7 @@ type PipelineProgressMsg struct {
 type PipelineLogMsg struct {
 	Log        string
 	StageIndex int
+	Stage      string // Stage name for status display
 	Error      bool
 	Complete   bool
 }

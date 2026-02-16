@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"hasher/pkg/hashing/jitter"
+
 	"github.com/lab/hasher/data-trainer/internal/config"
 	"github.com/lab/hasher/data-trainer/internal/logging"
 	"github.com/lab/hasher/data-trainer/pkg/deployment"
@@ -22,7 +24,6 @@ import (
 	"github.com/lab/hasher/data-trainer/pkg/storage"
 	"github.com/lab/hasher/data-trainer/pkg/training"
 	"github.com/lab/hasher/data-trainer/pkg/validator"
-	"hasher/pkg/hashing/jitter"
 )
 
 var (
@@ -30,7 +31,7 @@ var (
 	dataPath       = flag.String("data", "", "Path to data directory (default: app data directory)")
 	maxEpochs      = flag.Int("epochs", 10, "Maximum number of training epochs")
 	population     = flag.Int("population", 256, "Population size for evolution")
-	maxGenerations = flag.Int("generations", 200, "Maximum number of generations")
+	maxGenerations = flag.Int("generations", 2000, "Maximum number of generations")
 	difficultyBits = flag.Int("difficulty-bits", config.DefaultDifficultyBits, fmt.Sprintf("Number of leading bits that must match (%d-%d)", config.MinDifficultyBits, config.MaxDifficultyBits))
 	verbose        = flag.Bool("verbose", false, "Enable verbose logging")
 	sequential     = flag.Bool("sequential", false, "Process tokens sequentially (cleaner logs)")
