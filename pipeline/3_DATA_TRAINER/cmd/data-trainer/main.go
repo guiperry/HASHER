@@ -539,7 +539,17 @@ func (to *TrainingOrchestrator) trainRecord(ctx context.Context, record *trainin
 		pop.Generation++
 		to.harness.Generation = gen
 
-		if gen%50 == 0 {
+		if gen%10 == 0 || gen == *maxGenerations-1 {
+			bestMatch := 0
+			if len(eliteSeeds) > 0 {
+				diff := eliteSeeds[0].HashOutput ^ uint32(record.TargetToken)
+				bestMatch = bits.LeadingZeros32(diff)
+			}
+			stats := fmt.Sprintf("fit=%.4f best=%d bits", pop.Fitness, bestMatch)
+			to.logger.ProgressBar(gen+1, *maxGenerations, fmt.Sprintf("Token %d", record.TargetToken), stats)
+		}
+
+		if gen%50 == 0 && *verbose {
 			bestMatch := 0
 			if len(eliteSeeds) > 0 {
 				diff := eliteSeeds[0].HashOutput ^ uint32(record.TargetToken)
@@ -607,7 +617,17 @@ func (to *TrainingOrchestrator) trainToken(ctx context.Context, targetToken int3
 		pop.Generation++
 		to.harness.Generation = gen
 
-		if gen%50 == 0 {
+		if gen%10 == 0 || gen == *maxGenerations-1 {
+			bestMatch := 0
+			if len(eliteSeeds) > 0 {
+				diff := eliteSeeds[0].HashOutput ^ uint32(targetToken)
+				bestMatch = bits.LeadingZeros32(diff)
+			}
+			stats := fmt.Sprintf("fit=%.4f best=%d bits", pop.Fitness, bestMatch)
+			to.logger.ProgressBar(gen+1, *maxGenerations, fmt.Sprintf("Token %d", targetToken), stats)
+		}
+
+		if gen%50 == 0 && *verbose {
 			bestMatch := 0
 			if len(eliteSeeds) > 0 {
 				diff := eliteSeeds[0].HashOutput ^ uint32(targetToken)

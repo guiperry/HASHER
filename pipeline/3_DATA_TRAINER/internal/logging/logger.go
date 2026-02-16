@@ -106,6 +106,34 @@ func (l *Logger) Fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+func (l *Logger) ProgressBar(current, total int, label string, stats string) {
+	if l.level > INFO {
+		return
+	}
+
+	percent := float64(current) * 100 / float64(total)
+	filled := int(float64(current) * 20 / float64(total))
+	if filled > 20 {
+		filled = 20
+	}
+	bar := ""
+	for i := 0; i < 20; i++ {
+		if i < filled {
+			bar += "="
+		} else if i == filled {
+			bar += ">"
+		} else {
+			bar += "-"
+		}
+	}
+
+	// Use carriage return to overwrite the line
+	fmt.Printf("\r[%s] %3.0f%% | %s | %d/%d | %s\033[K", bar, percent, label, current, total, stats)
+	if current >= total {
+		fmt.Println()
+	}
+}
+
 func (l *Logger) Close() error {
 	return nil
 }
