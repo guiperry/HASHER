@@ -38,6 +38,78 @@ var pipelineState struct {
 	Mu      sync.Mutex
 }
 
+// FileLogger handles writing logs to a file
+type FileLogger struct {
+	file   *os.File
+	writer *bufio.Writer
+	mu     sync.Mutex
+}
+
+var (
+	logger     *FileLogger
+	loggerOnce sync.Once
+)
+
+// GetLogger returns the singleton file logger
+func GetLogger() *FileLogger {
+	loggerOnce.Do(func() {
+		logger = &FileLogger{}
+		logger.init()
+	})
+	return logger
+}
+
+// init initializes the file logger
+func (l *FileLogger) init() {
+	appDir, err := embedded.GetAppDataDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not get app data dir: %v\n", err)
+		return
+	}
+
+	logDir := filepath.Join(appDir, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not create log directory: %v\n", err)
+		return
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	logPath := filepath.Join(logDir, fmt.Sprintf("hasher-cli_%s.log", timestamp))
+
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not open log file: %v\n", err)
+		return
+	}
+
+	l.file = file
+	l.writer = bufio.NewWriter(file)
+	fmt.Fprintf(os.Stderr, "CLI logs: %s\n", logPath)
+}
+
+// Write writes a log message to the file
+func (l *FileLogger) Write(msg string) {
+	if l == nil || l.writer == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	timestamp := time.Now().Format("2006/01/02 15:04:05")
+	l.writer.WriteString(fmt.Sprintf("[%s] %s", timestamp, msg))
+	l.writer.Flush()
+}
+
+// Close closes the log file
+func (l *FileLogger) Close() {
+	if l == nil || l.file == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.writer.Flush()
+	l.file.Close()
+}
+
 // View states
 const (
 	PrimaryMenuView = iota
@@ -467,6 +539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case AppendLogMsg:
 		m.ServerLogs = append(m.ServerLogs, msg.Log)
+		GetLogger().Write(msg.Log + "\n")
 		if len(m.ServerLogs) > 50 {
 			m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
 		}
@@ -484,6 +557,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			select {
 			case log := <-m.LogChan:
 				m.ServerLogs = append(m.ServerLogs, log)
+				GetLogger().Write(log + "\n")
 				if len(m.ServerLogs) > 50 {
 					m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
 				}
@@ -541,6 +615,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CombinedLogChatMsg:
 		m.ServerLogs = append(m.ServerLogs, msg.Log)
+		GetLogger().Write(msg.Log + "\n")
 		if len(m.ServerLogs) > 50 {
 			m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
 		}
@@ -726,6 +801,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "3. Start Driver":
 						m.ServerStarting = true
 						m.ServerLogs = append(m.ServerLogs, "Initializing...")
+						GetLogger().Write("Initializing...\n")
 						cmds = append(cmds, m.startHasherHost())
 					case "4. Test Chat":
 						m.CurrentView = ChatView
@@ -2607,13 +2683,31 @@ func (m *Model) startHasherHost() tea.Cmd {
 		// Build hasher-host arguments
 		var args []string
 
+		// Build initial log message for debugging
+		logMsg := "Starting hasher-host...\n"
+
 		// Check if device configuration is available
 		deviceConfig, err := config.LoadDeviceConfig()
-		if err == nil && deviceConfig.IP != "" {
+		ipStr := "<nil>"
+		pwStr := "<empty>"
+		if deviceConfig != nil {
+			ipStr = deviceConfig.IP
+			if deviceConfig.Password != "" {
+				pwStr = "***"
+			}
+		}
+		logMsg += fmt.Sprintf("Config: IP=%s, Password=%s, Error=%v\n", ipStr, pwStr, err)
+		logMsg += fmt.Sprintf("BinDir: %s\n", binDir)
+
+		if err == nil && deviceConfig != nil && deviceConfig.IP != "" {
 			// Device is configured, use it
 			args = append(args, "--device="+deviceConfig.IP)
 			args = append(args, "--discover=false")
 			args = append(args, "--force-redeploy=true")
+			// Pass SSH password explicitly to avoid .env file issues
+			if deviceConfig.Password != "" {
+				args = append(args, "--server-ssh-password="+deviceConfig.Password)
+			}
 		} else {
 			// No device configuration, enable discovery for auto-detection
 			args = append(args, "--discover=true")
@@ -2623,6 +2717,21 @@ func (m *Model) startHasherHost() tea.Cmd {
 		// Start hasher-host with configured arguments
 		cmd := exec.Command(hostPath, args...)
 		cmd.Dir = binDir
+
+		// Pass device credentials via environment variables as well
+		// This ensures they're available even if .env file loading fails
+		cmd.Env = os.Environ()
+		if deviceConfig != nil {
+			if deviceConfig.IP != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_IP="+deviceConfig.IP)
+			}
+			if deviceConfig.Password != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_PASSWORD="+deviceConfig.Password)
+			}
+			if deviceConfig.Username != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_USERNAME="+deviceConfig.Username)
+			}
+		}
 
 		// Create pipes to capture output and forward to the UI
 		stdoutPipe, _ := cmd.StdoutPipe()
@@ -2694,7 +2803,7 @@ func (m *Model) startHasherHost() tea.Cmd {
 		}()
 
 		// Return initial log message - polling will be started by the AppendLogMsg handler
-		return AppendLogMsg{Log: fmt.Sprintf("hasher-host started with PID %d", cmd.Process.Pid)}
+		return AppendLogMsg{Log: logMsg + fmt.Sprintf("hasher-host started with PID %d", cmd.Process.Pid)}
 	}
 }
 

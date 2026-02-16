@@ -130,8 +130,8 @@ test-cli:
 	done
 
 run:
-	@echo "Running Hasher-Host..."
-	@./bin/hasher-host   --device=192.168.12.151   --discover=false
+	@echo "Running Hasher CLI..."
+	@./bin/hasher
 
 deploy: build
 	@./scripts/deploy.sh

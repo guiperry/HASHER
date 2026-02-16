@@ -113,7 +113,7 @@ var (
 	monitorServerLogs = flag.Bool("monitor-server-logs", true, "enable automatic monitoring of server logs for auto-recovery")
 	serverLogPath     = flag.String("server-log", "/tmp/hasher-server.log", "path to server log file on ASIC device")
 	serverDeviceIP    = flag.String("server-device-ip", "", "IP address of ASIC device (for log monitoring, auto-detected if empty)")
-	serverSSHPassword = flag.String("server-ssh-password", "*********", "SSH password for ASIC device (for log monitoring)")
+	serverSSHPassword = flag.String("server-ssh-password", "", "SSH password for ASIC device (for log monitoring). Defaults to DEVICE_PASSWORD env var or .env file")
 )
 
 // Orchestrator manages the recursive inference process
@@ -1059,7 +1059,7 @@ func (o *Orchestrator) handleInfer(c *gin.Context) {
 		Passes:            result.TotalPasses,
 		ValidPasses:       result.ValidPasses,
 		LatencyMs:         float64(latency.Milliseconds()),
-		UsingASIC:         o.engine.IsUsingHardware(),
+		UsingASIC:         o.safeIsUsingHardware(),
 	})
 }
 
@@ -1104,7 +1104,7 @@ func (o *Orchestrator) handleBatchInfer(c *gin.Context) {
 			results[i] = InferResponse{
 				Prediction: -1,
 				LatencyMs:  float64(inferLatency.Milliseconds()),
-				UsingASIC:  o.engine.IsUsingHardware(),
+				UsingASIC:  o.safeIsUsingHardware(),
 			}
 			continue
 		}
@@ -1116,15 +1116,28 @@ func (o *Orchestrator) handleBatchInfer(c *gin.Context) {
 			Passes:            result.TotalPasses,
 			ValidPasses:       result.ValidPasses,
 			LatencyMs:         float64(inferLatency.Milliseconds()),
-			UsingASIC:         o.engine.IsUsingHardware(),
+			UsingASIC:         o.safeIsUsingHardware(),
 		}
 	}
 
 	c.JSON(http.StatusOK, BatchInferResponse{
 		Results:   results,
 		TotalMs:   float64(time.Since(start).Milliseconds()),
-		UsingASIC: o.engine.IsUsingHardware(),
+		UsingASIC: o.safeIsUsingHardware(),
 	})
+}
+
+// safeIsUsingHardware safely checks if using hardware, recovering from any panics
+func (o *Orchestrator) safeIsUsingHardware() bool {
+	if o == nil || o.engine == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Warning: IsUsingHardware panic recovered: %v", r)
+		}
+	}()
+	return o.engine.IsUsingHardware()
 }
 
 // handleHealth handles health check requests
@@ -1149,9 +1162,12 @@ func (o *Orchestrator) handleHealth(c *gin.Context) {
 		status = "rebooting"
 	}
 
+	// Safely check if using hardware
+	usingASIC := o.safeIsUsingHardware()
+
 	c.JSON(http.StatusOK, HealthResponse{
 		Status:            status,
-		UsingASIC:         o.engine.IsUsingHardware(),
+		UsingASIC:         usingASIC,
 		ChipCount:         chipCount,
 		Uptime:            time.Since(o.startTime).String(),
 		ConnectionHealthy: connectionHealthy,
@@ -1183,7 +1199,7 @@ func (o *Orchestrator) handleMetrics(c *gin.Context) {
 		SuccessfulInfers: successfulInfers,
 		FailedInfers:     failedInfers,
 		AverageLatencyMs: avgLatencyMs,
-		UsingASIC:        o.engine.IsUsingHardware(),
+		UsingASIC:        o.safeIsUsingHardware(),
 		ChipCount:        chipCount,
 		Uptime:           time.Since(o.startTime).String(),
 	})
@@ -1527,7 +1543,7 @@ func (o *Orchestrator) handleTrain(c *gin.Context) {
 		Loss:      loss,
 		Accuracy:  accuracy,
 		LatencyMs: float64(latency.Milliseconds()),
-		UsingASIC: o.engine.IsUsingHardware(),
+		UsingASIC: o.safeIsUsingHardware(),
 	})
 }
 
@@ -1549,7 +1565,7 @@ func (o *Orchestrator) handleCryptoStatus(c *gin.Context) {
 		"num_heads":      o.cryptoModel.Config.NumHeads,
 		"ffn_hidden_dim": o.cryptoModel.Config.FFNHiddenDim,
 		"activation":     o.cryptoModel.Config.Activation,
-		"using_asic":     o.engine.IsUsingHardware(),
+		"using_asic":     o.safeIsUsingHardware(),
 	})
 }
 

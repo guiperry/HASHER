@@ -38,6 +38,13 @@ var (
 )
 
 func main() {
+	// Recover from any panics
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "PANIC: %v\n", r)
+		}
+	}()
+
 	flag.Parse()
 
 	// Initialize embedded binaries
@@ -141,10 +148,15 @@ func copyEnvFileToBinDir(binDir string) {
 	destPath := filepath.Join(binDir, ".env")
 	srcData, err := os.ReadFile(envPath)
 	if err != nil {
+		fmt.Printf("Warning: Could not read .env file: %v\n", err)
 		return
 	}
 
-	_ = os.WriteFile(destPath, srcData, 0644)
+	if err := os.WriteFile(destPath, srcData, 0644); err != nil {
+		fmt.Printf("Warning: Could not copy .env to bin directory: %v\n", err)
+		return
+	}
+	fmt.Printf("Copied .env file to %s\n", destPath)
 }
 
 // findEnvFile finds .env file in CWD or parent directories

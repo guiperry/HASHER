@@ -59,7 +59,24 @@ func (e *RecursiveEngine) SetHashMethod(method core.HashMethod) {
 
 // IsUsingHardware returns true if the engine is using hardware acceleration
 func (e *RecursiveEngine) IsUsingHardware() bool {
-	return e.hashMethod != nil && e.hashMethod.IsAvailable()
+	if e == nil {
+		return false
+	}
+	// Check if hashMethod is nil (interface is nil)
+	if e.hashMethod == nil {
+		return false
+	}
+	// Use a deferred recover to catch any unexpected panics from IsAvailable
+	// This handles edge cases where the interface might be in an invalid state
+	safeCall := func() (result bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				result = false
+			}
+		}()
+		return e.hashMethod.IsAvailable()
+	}
+	return safeCall()
 }
 
 // Infer performs recursive inference on the given input using temporal ensemble
