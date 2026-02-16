@@ -183,8 +183,8 @@ func (h *HasherWrapper) SimulateHash(seed []byte, pass int) (uint32, error) {
 		return 0, fmt.Errorf("hash computation failed: %w", err)
 	}
 
-	// Extract first 4 bytes as uint32 result (Little-Endian for simulator compatibility)
-	result := binary.LittleEndian.Uint32(hash[:4])
+	// Extract first 4 bytes as uint32 result (Big-Endian for simulator compatibility)
+	result := binary.BigEndian.Uint32(hash[:4])
 
 	// Cache result
 	if len(h.cache) < h.config.CacheSize {
@@ -222,7 +222,7 @@ func (h *HasherWrapper) SimulateBitcoinHeader(header []byte) (uint32, error) {
 		return 0, err
 	}
 
-	return binary.LittleEndian.Uint32(hash2[:4]), nil
+	return binary.BigEndian.Uint32(hash2[:4]), nil
 }
 
 // RecursiveMine performs the 21-pass temporal loop with associative jitter

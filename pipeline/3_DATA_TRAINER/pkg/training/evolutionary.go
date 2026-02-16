@@ -260,8 +260,9 @@ func (sp *SeedPopulation) GetSeedIDs() []uint32 {
 }
 
 func (tr *TrainingRecord) Validate() bool {
-	// TokenSequence is optional (not present in Stage 2 output)
-	// Only validate if present
+	if len(tr.TokenSequence) == 0 {
+		return false
+	}
 
 	if tr.TargetToken <= 0 {
 		return false
@@ -888,7 +889,7 @@ func (eh *EvolutionaryHarness) EvaluatePopulationBatch(
 		copy(result.Seed, finalHash)
 
 		// The golden nonce is first 4 bytes of final Double-SHA256 for bit-matching
-		goldenNonce := binary.LittleEndian.Uint32(finalHash[:4])
+		goldenNonce := binary.BigEndian.Uint32(finalHash[:4])
 
 		// Store hash output for bit-matching
 		result.HashOutput = goldenNonce

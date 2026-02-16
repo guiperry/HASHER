@@ -121,8 +121,8 @@ func (cb *CudaBridge) ProcessHeadersBatch(headers [][]byte, targetTokenID uint32
 	// Extract first 4 bytes of each hash for comparison
 	var matches []uint32
 	for _, result := range fullResults {
-		// First 4 bytes as uint32 (Little-Endian)
-		hash := binary.LittleEndian.Uint32(result[:4])
+		// First 4 bytes as uint32 (Big-Endian)
+		hash := binary.BigEndian.Uint32(result[:4])
 
 		// Check if hash matches target token (with tolerance for mining)
 		if hash == targetTokenID ||
@@ -173,7 +173,7 @@ func (cb *CudaBridge) ComputeDoubleHashFull(headers [][]byte) ([][32]byte, error
 			return nil, fmt.Errorf("header %d: expected 80 bytes, got %d", i, len(h))
 		}
 		for j := 0; j < 20; j++ {
-			headerArray[i*20+j] = uint32(h[j*4]) | uint32(h[j*4+1])<<8 | uint32(h[j*4+2])<<16 | uint32(h[j*4+3])<<24
+			headerArray[i*20+j] = binary.BigEndian.Uint32(h[j*4 : (j+1)*4])
 		}
 	}
 
@@ -195,7 +195,7 @@ func (cb *CudaBridge) ComputeDoubleHashFull(headers [][]byte) ([][32]byte, error
 	finalResults := make([][32]byte, numHeaders)
 	for i := 0; i < numHeaders; i++ {
 		for j := 0; j < 8; j++ {
-			binary.LittleEndian.PutUint32(finalResults[i][j*4:], results[i*8+j])
+			binary.BigEndian.PutUint32(finalResults[i][j*4:], results[i*8+j])
 		}
 	}
 

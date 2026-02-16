@@ -100,3 +100,4 @@ hasher-host
 /pipeline/3_DATA_TRAINER/data
 cli
 /pipeline/AlpacaDataCleaned-main
+pipeline/AlpacaDataCleaned-main.zip
