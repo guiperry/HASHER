@@ -30,6 +30,7 @@ import (
 
 	"hasher/internal/config"
 	"hasher/internal/discovery"
+	devicepkg "hasher/internal/driver/device"
 	"hasher/internal/host"
 	"hasher/pkg/hashing/inference"
 	jitterpkg "hasher/pkg/hashing/jitter"
@@ -115,6 +116,14 @@ var (
 	serverLogPath     = flag.String("server-log", "/tmp/hasher-server.log", "path to server log file on ASIC device")
 	serverDeviceIP    = flag.String("server-device-ip", "", "IP address of ASIC device (for log monitoring, auto-detected if empty)")
 	serverSSHPassword = flag.String("server-ssh-password", "", "SSH password for ASIC device (for log monitoring). Defaults to DEVICE_PASSWORD env var or .env file")
+
+	// Knowledge base
+	framesDir = flag.String("frames-dir", "", "directory of training frame JSON files to load into the FlashSearcher at startup (e.g. /data/hasher/frames)")
+
+	// CGMiner API (direct ASIC integration)
+	cgminerHost    = flag.String("cgminer-host", "", "CGMiner API host (e.g. 192.168.12.151). If set, the ASIC mines the final golden nonce for each inference token")
+	cgminerPort    = flag.Int("cgminer-port", 4028, "CGMiner API port (default 4028)")
+	cgminerTimeout = flag.Duration("cgminer-timeout", 10*time.Second, "timeout per CGMiner mining request")
 )
 
 // Orchestrator manages the recursive inference process
@@ -123,8 +132,9 @@ type Orchestrator struct {
 	engine          *inference.RecursiveEngine
 	network         *neural.HashNetwork
 	cryptoModel     *transformer.HasherTransformer
-	miningNeuron    *neural.MiningNeuron   // Mining neuron for proof-of-work attestation
-	jitterEngine    *jitterpkg.JitterEngine // Core inference engine: 21-pass associative loop
+	miningNeuron    *neural.MiningNeuron          // Mining neuron for proof-of-work attestation
+	jitterEngine    *jitterpkg.JitterEngine        // Core inference engine: 21-pass associative loop
+	cgminerMethod   *devicepkg.CGMinerHashMethod   // CGMiner ASIC for final golden-nonce mining
 	discoveryResult *discovery.DiscoveryResult
 	startTime       time.Time
 	mu              sync.RWMutex
@@ -541,6 +551,34 @@ func main() {
 	inferenceJitterEngine := jitterpkg.NewJitterEngine(jitterCfg)
 	log.Printf("JitterEngine initialized: %d-pass temporal loop (software SHA-256)", jitterCfg.PassCount)
 
+	// Load training frames into the FlashSearcher knowledge base.
+	// This enables the 3-zone associative lookup and Reverse Lookup (golden nonce → token).
+	if *framesDir != "" {
+		n, err := jitterpkg.LoadFromDirectory(inferenceJitterEngine.GetSearcher(), *framesDir)
+		if err != nil {
+			log.Printf("Warning: knowledge base load error: %v", err)
+		} else {
+			log.Printf("Knowledge base: loaded %d training frames from %s", n, *framesDir)
+		}
+	} else {
+		log.Printf("Knowledge base: no --frames-dir specified; FlashSearcher starts empty")
+	}
+
+	// Connect to the CGMiner API for ASIC-backed final nonce mining.
+	// When available, the ASIC mines the semantically refined header at ~500 GH/s,
+	// making the golden nonce a genuine hardware output rather than a software hash.
+	var cgminerMethod *devicepkg.CGMinerHashMethod
+	if *cgminerHost != "" {
+		var cgminerErr error
+		cgminerMethod, cgminerErr = devicepkg.NewCGMinerHashMethod(*cgminerHost, *cgminerPort, *cgminerTimeout)
+		if cgminerErr != nil {
+			log.Printf("Warning: CGMiner unavailable at %s:%d: %v — using software golden nonce", *cgminerHost, *cgminerPort, cgminerErr)
+			cgminerMethod = nil
+		} else {
+			log.Printf("CGMiner connected at %s:%d — ASIC will mine the final golden nonce", *cgminerHost, *cgminerPort)
+		}
+	}
+
 	// Create orchestrator
 	orch := &Orchestrator{
 		asicClient:         asicClient,
@@ -549,6 +587,7 @@ func main() {
 		cryptoModel:        cryptoModel,
 		miningNeuron:       miningNeuron,
 		jitterEngine:       inferenceJitterEngine,
+		cgminerMethod:      cgminerMethod,
 		discoveryResult:    discoveryResult,
 		startTime:          time.Now(),
 		deployer:           deployer,
@@ -1487,12 +1526,27 @@ func (o *Orchestrator) handleChat(c *gin.Context) {
 			break
 		}
 
+		// Determine the golden nonce for this step.
+		// If CGMiner is available, the ASIC mines the 21-pass-refined header to produce
+		// a hardware-attested nonce (500 GH/s hash velocity).
+		// Otherwise the software 21-pass result nonce is used.
+		goldenNonce := result.Nonce
+		if o.cgminerMethod != nil && o.cgminerMethod.IsAvailable() {
+			asicNonce, _, mineErr := o.cgminerMethod.MineForGoldenNonce(header)
+			if mineErr != nil {
+				log.Printf("Warning: CGMiner mining failed at step %d: %v (using software nonce)", i, mineErr)
+			} else {
+				goldenNonce = asicNonce
+				usingASIC = true
+			}
+		}
+
 		// The golden nonce IS the token address in the knowledge base (Reverse Lookup).
-		nextTokenID, found := o.jitterEngine.GetSearcher().LookupByNonce(result.Nonce, vocabSize)
+		nextTokenID, found := o.jitterEngine.GetSearcher().LookupByNonce(goldenNonce, vocabSize)
 		if !found {
 			// Knowledge base miss: project the nonce into the vocabulary range.
 			// This produces valid, displayable output even before training data is loaded.
-			nextTokenID = int(result.Nonce % uint32(vocabSize))
+			nextTokenID = int(goldenNonce % uint32(vocabSize))
 		}
 
 		generatedTokens = append(generatedTokens, nextTokenID)
