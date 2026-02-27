@@ -16,5 +16,5 @@ func LoadEnv() {
 
 // GetCloudflareEndpoint returns the Cloudflare embeddings endpoint from environment variables
 func GetCloudflareEndpoint() string {
-	return os.Getenv("CLOUDFLARE_EMBEDDINGS_WORKER")
+	return os.Getenv("CLOUDFLARE_EMBEDDINGS_URL")
 }

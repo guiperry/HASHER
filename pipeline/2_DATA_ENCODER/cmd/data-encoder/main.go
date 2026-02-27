@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 
+	"data-encoder/internal"
 	"data-encoder/pkg/analyzer"
 	"data-encoder/pkg/checkpoint"
 	"data-encoder/pkg/embeddings"
@@ -29,6 +30,7 @@ type Config struct {
 	InputFile  string
 	OutputFile string
 	MapperSeed int64
+	TokenTest  bool // Run token test and exit
 
 	// Worker configuration
 	NumWorkers int // Default: 4 workers
@@ -46,6 +48,14 @@ type Config struct {
 func main() {
 	// Parse command line flags
 	config := parseFlags()
+
+	// Token test mode - run tokenization test and exit
+	if config.TokenTest {
+		if err := internal.GetTokens(); err != nil {
+			log.Fatalf("Token test failed: %v", err)
+		}
+		return
+	}
 
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
@@ -93,6 +103,9 @@ func parseFlags() *Config {
 	// NEW: Quota and checkpoint configuration
 	flag.IntVar(&config.QuotaLimit, "quota", 5000, "Maximum embeddings quota per run")
 	flag.BoolVar(&config.EnableCheckpoint, "checkpoint", true, "Enable checkpoint/resume functionality")
+
+	// Token test mode
+	flag.BoolVar(&config.TokenTest, "tokens", false, "Run tokenization test and exit")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Data Encoder - Transform embeddings into hardware-ready Neural Frames\n\n")
@@ -813,7 +826,7 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 
 		// 6. Process each window in the batch
 		log.Printf("[PROCESS] Step 6/6: Writing %d frames to JSON array...", len(batch))
-		
+
 		// Maintain a rolling XOR history for memory slots (6-8)
 		// We use a simple 3-uint32 state that we XOR with each new header
 		memoryState := [3]uint32{0x5F3759DF, 0x12345678, 0x87654321} // Initial seeds
@@ -833,13 +846,15 @@ func processSingleRecordWithSlidingWindow(record *schema.MinedRecord, frameCount
 
 			for j, spacyOffset := range record.TokenOffsets {
 				diff := spacyOffset - targetOffset
-				if diff < 0 { diff = -diff }
-				
+				if diff < 0 {
+					diff = -diff
+				}
+
 				if diff < minDiff {
 					minDiff = diff
 					bestMatchIdx = j
 				}
-				
+
 				// Perfect match found
 				if diff == 0 {
 					break

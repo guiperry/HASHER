@@ -335,7 +335,7 @@ build-data-miner:
 
 ## build-data-encoder: Build data encoder pipeline binary
 build-data-encoder:
-	$(call build-pipeline-binary,data-encoder,2_DATA_ENCODER,.)
+	$(call build-pipeline-binary,data-encoder,2_DATA_ENCODER,./cmd/data-encoder)
 
 ## build-data-trainer: Build data trainer pipeline binary
 build-data-trainer:

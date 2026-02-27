@@ -174,13 +174,24 @@ func (p *HybridEmbeddingProvider) getCloudflareEmbedding(text string) ([]float32
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("Cloudflare API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Detect HTML response (worker down / wrong URL)
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/html") || (len(body) > 0 && body[0] == '<') {
+		preview := string(body)
+		if len(preview) > 300 {
+			preview = preview[:300] + "..."
+		}
+		return nil, fmt.Errorf("Cloudflare worker returned HTML instead of JSON (worker may be down or URL is wrong): %s", preview)
+	}
+
 	var cloudflareResp CloudflareEmbeddingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cloudflareResp); err != nil {
+	if err := json.Unmarshal(body, &cloudflareResp); err != nil {
 		return nil, fmt.Errorf("failed to decode Cloudflare response: %w", err)
 	}
 

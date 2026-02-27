@@ -2,7 +2,7 @@
 
 # Variables
 BINARY_NAME=data-encoder
-MAIN_PACKAGE=.
+MAIN_PACKAGE=./cmd/data-encoder
 GO_FILES=$(shell find . -name "*.go" -type f)
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')

@@ -10,7 +10,7 @@ func TestNew(t *testing.T) {
 	// Test with environment variable set
 	t.Run("with endpoint", func(t *testing.T) {
 		testURL := "http://embeddings.knirv.com"
-		t.Setenv("CLOUDFLARE_EMBEDDINGS_WORKER", testURL)
+		t.Setenv("CLOUDFLARE_EMBEDDINGS_URL", testURL)
 		svc := New()
 
 		if svc == nil {
@@ -32,7 +32,7 @@ func TestNew(t *testing.T) {
 
 	// Test without environment variable set
 	t.Run("without endpoint", func(t *testing.T) {
-		t.Setenv("CLOUDFLARE_EMBEDDINGS_WORKER", "")
+		t.Setenv("CLOUDFLARE_EMBEDDINGS_URL", "")
 		svc := New()
 
 		if svc == nil {

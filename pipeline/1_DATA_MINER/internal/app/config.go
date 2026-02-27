@@ -68,18 +68,18 @@ func ParseFlags() *Config {
 	}
 
 	config := &Config{
-		InputDir:     dirs["documents"],
-		OutputFile:   filepath.Join(dirs["json"], "ai_knowledge_base.json"),
-		NumWorkers:   numWorkers,
-		ChunkSize:    150,
-		ChunkOverlap: 25,
-		OllamaModel:  "nomic-embed-text",
+		InputDir:       dirs["documents"],
+		OutputFile:     filepath.Join(dirs["json"], "ai_knowledge_base.json"),
+		NumWorkers:     numWorkers,
+		ChunkSize:      150,
+		ChunkOverlap:   25,
+		OllamaModel:    "nomic-embed-text",
 		OllamaGenModel: "llama3",
-		OllamaHost:   "http://localhost:11434",
-		CheckpointDB: filepath.Join(dirs["checkpoints"], "checkpoints.db"),
-		BatchSize:    numWorkers,
-		AppDataDir:   appDataDir,
-		DataDirs:     dirs,
+		OllamaHost:     "http://localhost:11434",
+		CheckpointDB:   filepath.Join(dirs["checkpoints"], "checkpoints.db"),
+		BatchSize:      numWorkers,
+		AppDataDir:     appDataDir,
+		DataDirs:       dirs,
 
 		// arXiv mining defaults
 		EnableArxivMining:   false,
@@ -100,7 +100,7 @@ func ParseFlags() *Config {
 		DryRun:         false,
 	}
 
-	config.CloudflareEndpoint = os.Getenv("CLOUDFLARE_EMBEDDINGS_WORKER")
+	config.CloudflareEndpoint = os.Getenv("CLOUDFLARE_EMBEDDINGS_URL")
 
 	// Define flags
 	flag.StringVar(&config.InputDir, "input", config.InputDir, "Directory containing PDF files")

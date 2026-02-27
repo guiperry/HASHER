@@ -562,16 +562,14 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 	fmt.Printf("🔄 Starting Continuous Workflow\n")
 	fmt.Printf("================================\n")
 
-	// 1. Ensure Ollama is running (if needed)
-	// Skip local server startup in Goat mode if Cloudflare is working
-	shouldSkipLocalServers := config.GoatMode && config.CloudflareEndpoint != ""
-	
-	if !shouldSkipLocalServers {
-		if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
-			fmt.Printf("⚠️  Warning: Failed to ensure Ollama is running: %v\n", err)
-		}
+	// 1. Ensure Ollama is running — always required as the fallback for embeddings
+	if err := CheckOrStartOllama(config.OllamaHost, config.OllamaModel); err != nil {
+		fmt.Printf("⚠️  Warning: Failed to ensure Ollama is running: %v\n", err)
+		fmt.Printf("    Cloudflare will be used for embeddings; Ollama fallback unavailable\n")
+	}
 
-		// 2. Try to start OpenCode server as a secondary provider
+	// 2. Try to start OpenCode server as a secondary provider (skip in Goat+Cloudflare mode)
+	if !config.GoatMode || config.CloudflareEndpoint == "" {
 		fmt.Println("🚀 Ensuring OpenCode server is running on port 5500...")
 		if !IsOpenCodeRunning() {
 			go func() {
@@ -582,8 +580,6 @@ func RunContinuousWorkflow(ctx context.Context, config *Config, statsManager *St
 		} else {
 			fmt.Println("✅ OpenCode server is already running")
 		}
-	} else {
-		fmt.Println("💡 Skipping local Ollama/OpenCode startup (Goat mode + Cloudflare active)")
 	}
 
 	// 3. Smart model selection for Ollama (Embedding)
