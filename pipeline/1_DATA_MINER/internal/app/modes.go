@@ -1,8 +1,11 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 )
 
 // RunApplication is the main entry point - runs the orchestrator with continuous workflow
@@ -22,6 +25,11 @@ func RunApplication(config *Config) error {
 		PrintConfiguration(config)
 		fmt.Println("🔍 Dry run completed - no processing performed")
 		return nil
+	}
+
+	// Handle demo mode: generate hello world training frames and exit
+	if config.DemoMode {
+		return RunDemoFrameGenerator(config)
 	}
 
 	// Enable optimized mode by default
@@ -102,6 +110,99 @@ func PrintModeInfo(mode string) {
 		fmt.Println("🔄 Workflow Mode: Integrated processing")
 	default:
 		fmt.Println("🔧 Default Mode: Standard neural processing")
+	}
+}
+
+// demoTrainingFrame mirrors the trainer's expected JSON structure for demo frames.
+type demoTrainingFrame struct {
+	SourceFile    string  `json:"source_file"`
+	ChunkID       int     `json:"chunk_id"`
+	WindowStart   int     `json:"window_start"`
+	TokenSequence []int   `json:"token_sequence"`
+	TargetToken   int     `json:"target_token"`
+	FeatureVector []int64 `json:"feature_vector"`
+	ContextHash   int     `json:"context_hash"`
+}
+
+// RunDemoFrameGenerator generates hello world training frames.
+// It first tries to run the Python script at the known location; if unavailable,
+// it generates the same frames directly in Go.
+func RunDemoFrameGenerator(config *Config) error {
+	fmt.Println("🎮 Demo Mode: Generating hello world training frames...")
+
+	outputDir := filepath.Join(config.AppDataDir, "frames")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create frames directory: %w", err)
+	}
+	outputFile := filepath.Join(outputDir, "training_frames.json")
+
+	// Try running the Python script first.
+	scriptCandidates := []string{
+		filepath.Join("pipeline", "1_DATA_MINER", "scripts", "generate_hello_world.py"),
+		filepath.Join("..", "scripts", "generate_hello_world.py"),
+	}
+	for _, script := range scriptCandidates {
+		if _, err := os.Stat(script); err == nil {
+			fmt.Printf("📜 Running Python script: %s\n", script)
+			cmd := exec.Command("python3", script)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err == nil {
+				fmt.Println("✅ Demo frames generated via Python script")
+				return nil
+			}
+			// Python failed — fall through to Go fallback
+			fmt.Println("⚠️  Python script failed, generating frames in Go...")
+			break
+		}
+	}
+
+	// Go fallback: generate the same hello world frames directly.
+	frames := buildHelloWorldFrames()
+	data, err := json.MarshalIndent(frames, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal demo frames: %w", err)
+	}
+	if err := os.WriteFile(outputFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write demo frames: %w", err)
+	}
+	fmt.Printf("✅ Demo frames written to %s (%d frames)\n", outputFile, len(frames))
+	return nil
+}
+
+// buildHelloWorldFrames creates a minimal hello-world conversation dataset.
+// Token IDs use cl100k_base values mod 1000, matching the trainer's expectations.
+func buildHelloWorldFrames() []demoTrainingFrame {
+	// Feature vector: [token_sequence_packed, target, zeros...]
+	// The trainer uses these 12 slots as the ASIC input header.
+	makeFeatureVector := func(tok, target int) []int64 {
+		fv := make([]int64, 12)
+		fv[0] = int64(tok)
+		fv[1] = int64(target)
+		return fv
+	}
+
+	return []demoTrainingFrame{
+		// "Hello" (9906 % 1000 = 906) → " world" (1917 % 1000 = 917)
+		{SourceFile: "demo.txt", ChunkID: 1, WindowStart: 0,
+			TokenSequence: []int{906}, TargetToken: 917,
+			FeatureVector: makeFeatureVector(906, 917)},
+		// " world" → "!" (0)
+		{SourceFile: "demo.txt", ChunkID: 2, WindowStart: 1,
+			TokenSequence: []int{906, 917}, TargetToken: 0,
+			FeatureVector: makeFeatureVector(917, 0)},
+		// "What" (3923 % 1000 = 923) → " is" (374)
+		{SourceFile: "demo.txt", ChunkID: 3, WindowStart: 0,
+			TokenSequence: []int{923}, TargetToken: 374,
+			FeatureVector: makeFeatureVector(923, 374)},
+		// " is" → " your" (701)
+		{SourceFile: "demo.txt", ChunkID: 4, WindowStart: 1,
+			TokenSequence: []int{923, 374}, TargetToken: 701,
+			FeatureVector: makeFeatureVector(374, 701)},
+		// " your" → " name" (836)
+		{SourceFile: "demo.txt", ChunkID: 5, WindowStart: 2,
+			TokenSequence: []int{923, 374, 701}, TargetToken: 836,
+			FeatureVector: makeFeatureVector(701, 836)},
 	}
 }
 

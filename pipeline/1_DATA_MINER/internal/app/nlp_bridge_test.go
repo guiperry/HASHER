@@ -66,7 +66,7 @@ func TestNLPBridge_ProcessText(t *testing.T) {
 	if words[0] != "The" {
 		t.Errorf("Expected first word 'The', got '%s'", words[0])
 	}
-	if posTags[0] != MapPOSTag("DET") {
+	if posTags[0] != int(MapPOSTag("DET")) {
 		t.Errorf("Expected DET tag for 'The', got 0x%02X", posTags[0])
 	}
 }

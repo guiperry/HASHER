@@ -118,6 +118,7 @@ const (
 	ProgressView
 	LogView
 	PipelineView
+	PipelineSelectView
 )
 
 // Styles
@@ -258,6 +259,25 @@ var primaryMenuItems = []list.Item{
 	},
 }
 
+// Pipeline type menu items
+var pipelineTypeMenuItems = []list.Item{
+	menuItem{
+		title:       "1. GOAT Dataset",
+		description: "Mine the GOAT instruction-tuning dataset from Hugging Face",
+		view:        PipelineView,
+	},
+	menuItem{
+		title:       "2. ArXiv Papers",
+		description: "Mine arXiv research papers and build training frames",
+		view:        PipelineView,
+	},
+	menuItem{
+		title:       "3. Demo (Hello World)",
+		description: "Generate hello world demo frames — fastest way to test the pipeline",
+		view:        PipelineView,
+	},
+}
+
 // ASIC Config menu items (secondary menu)
 var asicConfigMenuItems = []list.Item{
 	menuItem{
@@ -327,8 +347,9 @@ type Model struct {
 	ServerCmd      *exec.Cmd
 	ServerLogs     []string
 	ChatHistory    []string
-	ServerReady    bool
-	ServerStarting bool // true when hasher-host process is running but not ready yet
+	ServerReady      bool
+	ServerStarting   bool // true when hasher-host process is running but not ready yet
+	ShowingInitLogs  bool // true when the init log panel is visible (Esc hides it)
 	ResourceData   string
 	Width          int
 	Height         int
@@ -358,6 +379,8 @@ type Model struct {
 	PipelineProgress float64
 	PipelineLogs     []string
 	PipelineStages   []PipelineStage
+	PipelineType     string     // Selected pipeline type: "goat", "arxiv", "demo"
+	PipelineTypeMenu list.Model // Type selection sub-menu
 
 	// Log channel for hasher-host output
 	LogChan chan string
@@ -470,6 +493,14 @@ func NewModel() Model {
 		PipelineStage:    "",
 		PipelineProgress: 0,
 		PipelineLogs:     []string{},
+		PipelineType:     "goat",
+		PipelineTypeMenu: func() list.Model {
+			l := list.New(pipelineTypeMenuItems, list.NewDefaultDelegate(), defaultWidth-4, 8)
+			l.Title = "Select Pipeline Type"
+			l.SetShowStatusBar(false)
+			l.SetFilteringEnabled(false)
+			return l
+		}(),
 		PipelineStages: []PipelineStage{
 			{
 				Name:    "data-miner",
@@ -649,8 +680,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ServerReadyMsg:
 		m.ServerReady = msg.Ready
 		m.ServerStarting = msg.Starting
-		if msg.Ready && msg.Port > 0 {
-			m.APIClient = client.NewAPIClient(msg.Port)
+		if msg.Ready {
+			// Server is up — auto-dismiss the init log panel so the menu reappears
+			m.ShowingInitLogs = false
+			if msg.Port > 0 {
+				m.APIClient = client.NewAPIClient(msg.Port)
+			}
 		}
 		// Continue periodic health checks
 		return m, m.checkServerHealth()
@@ -755,7 +790,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.CurrentView {
 	case PrimaryMenuView:
 		// If in initialization mode, handle InitView scrolling
-		if m.ServerStarting && !m.ServerReady {
+		if m.ShowingInitLogs {
 			// Pass message to viewport for mouse wheel support
 			m.InitView, cmd = m.InitView.Update(msg)
 			if cmd != nil {
@@ -764,6 +799,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if keyMsg, ok := msg.(tea.KeyMsg); ok {
 				switch keyMsg.Type {
+				case tea.KeyEsc:
+					// Dismiss log view and return to menu without stopping the server
+					m.ShowingInitLogs = false
 				case tea.KeyUp:
 					m.InitView.LineUp(1)
 				case tea.KeyDown:
@@ -786,25 +824,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if i, ok := m.PrimaryMenu.SelectedItem().(menuItem); ok {
 					switch i.title {
 					case "1. Data Pipeline":
-						m.CurrentView = PipelineView
-						m.PipelineRunning = true
-						m.PipelineStage = "initializing"
-						m.PipelineProgress = 0
-						m.PipelineLogs = []string{"[DEBUG] Data Pipeline selected, starting..."}
-
-						// Add immediate command execution test
-						pipelineCmd := m.runDataPipeline()
-						logMsg := fmt.Sprintf("[%s] 🎯 Pipeline command created: %T", time.Now().Format("15:04:05"), pipelineCmd)
-						m.PipelineLogs = append(m.PipelineLogs, logMsg)
-
-						cmds = append(cmds, pipelineCmd)
-						cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
-							return pollPipelineLogsMsg{}
-						}))
+						// Show pipeline type selection sub-menu before starting
+						m.CurrentView = PipelineSelectView
 					case "2. ASIC Config":
 						m.CurrentView = AsicConfigView
 					case "3. Start Driver":
 						m.ServerStarting = true
+						m.ShowingInitLogs = true
 						m.ServerLogs = append(m.ServerLogs, "Initializing...")
 						GetLogger().Write("Initializing...\n")
 						cmds = append(cmds, m.startHasherHost())
@@ -1005,6 +1031,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.CurrentView = PrimaryMenuView
 			}
 		}
+
+	case PipelineSelectView:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.CurrentView = PrimaryMenuView
+			case tea.KeyEnter:
+				if i, ok := m.PipelineTypeMenu.SelectedItem().(menuItem); ok {
+					m.PipelineType = pipelineTypeFromTitle(i.title)
+					m.PipelineStages = buildPipelineStages(m.PipelineType)
+					m.CurrentView = PipelineView
+					m.PipelineRunning = true
+					m.PipelineStage = "initializing"
+					m.PipelineProgress = 0
+					m.PipelineLogs = []string{
+						fmt.Sprintf("[%s] Pipeline type selected: %s", time.Now().Format("15:04:05"), m.PipelineType),
+					}
+					pipelineCmd := m.runDataPipeline()
+					cmds = append(cmds, pipelineCmd)
+					cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+						return pollPipelineLogsMsg{}
+					}))
+				}
+			default:
+				m.PipelineTypeMenu, cmd = m.PipelineTypeMenu.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		default:
+			m.PipelineTypeMenu, cmd = m.PipelineTypeMenu.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -1023,6 +1081,8 @@ func (m Model) View() string {
 		return m.renderProgressView()
 	case PipelineView:
 		return m.renderPipelineView()
+	case PipelineSelectView:
+		return m.renderPipelineSelectView()
 	}
 
 	return m.renderPrimaryMenu()
@@ -1072,9 +1132,9 @@ func (m Model) renderPrimaryMenu() string {
 		menuHeight = 6
 	}
 
-	// Show initialization logs if server is starting but not ready
+	// Show initialization logs if the log panel is visible
 	var mainContent string
-	if m.ServerStarting && !m.ServerReady {
+	if m.ShowingInitLogs {
 		// Show initialization logs in blue box using viewport for scrolling
 		// Update viewport dimensions - fill the available space
 		m.InitView.Height = menuHeight - 3 // Leave room for title and padding
@@ -1090,7 +1150,7 @@ func (m Model) renderPrimaryMenu() string {
 		scrollbar := m.renderInitScrollbar()
 
 		// Build the content: title + viewport + scrollbar side by side
-		initTitle := infoStyle.Render("⚡ Initializing Hasher Server...") + "\n" + strings.Repeat("─", m.InitView.Width) + "\n"
+		initTitle := infoStyle.Render("⚡ Initializing Hasher Server...  (Esc = back to menu)") + "\n" + strings.Repeat("─", m.InitView.Width) + "\n"
 		contentWithScrollbar := lipgloss.JoinHorizontal(lipgloss.Top, m.InitView.View(), " "+scrollbar)
 		initBoxContent := initTitle + contentWithScrollbar
 
@@ -1307,6 +1367,69 @@ func (m Model) renderChatView() string {
 		input,
 		footer,
 	)
+}
+
+// pipelineTypeFromTitle maps a menu item title to a pipeline type key.
+func pipelineTypeFromTitle(title string) string {
+	switch title {
+	case "1. GOAT Dataset":
+		return "goat"
+	case "2. ArXiv Papers":
+		return "arxiv"
+	case "3. Demo (Hello World)":
+		return "demo"
+	default:
+		return "goat"
+	}
+}
+
+// buildPipelineStages returns the pipeline stages for the given type.
+func buildPipelineStages(pipelineType string) []PipelineStage {
+	trainerStage := PipelineStage{
+		Name:    "data-trainer",
+		BinName: "data-trainer",
+		Args:    []string{"-verbose", "-epochs", "5", "-sequential", "-hash-method", "cuda"},
+		Desc:    "Data Trainer - Neural network training",
+	}
+	switch pipelineType {
+	case "arxiv":
+		return []PipelineStage{
+			{Name: "data-miner", BinName: "data-miner",
+				Args: []string{"-arxiv-enable"}, Desc: "Data Miner - ArXiv paper mining"},
+			{Name: "data-encoder", BinName: "data-encoder",
+				Args: []string{"-workers", "2"}, Desc: "Data Encoder - Tokenization and embeddings"},
+			trainerStage,
+		}
+	case "demo":
+		// Demo generates trainer-compatible JSON directly; skip the encoder.
+		return []PipelineStage{
+			{Name: "data-miner", BinName: "data-miner",
+				Args: []string{"-demo"}, Desc: "Data Miner - Generating hello world demo frames"},
+			trainerStage,
+		}
+	default: // "goat"
+		return []PipelineStage{
+			{Name: "data-miner", BinName: "data-miner",
+				Args: []string{"-goat"}, Desc: "Data Miner - GOAT dataset mining"},
+			{Name: "data-encoder", BinName: "data-encoder",
+				Args: []string{"-workers", "2"}, Desc: "Data Encoder - Tokenization and embeddings"},
+			trainerStage,
+		}
+	}
+}
+
+// renderPipelineSelectView renders the pipeline type selection sub-menu.
+func (m Model) renderPipelineSelectView() string {
+	header := headerStyle.Copy().Width(m.Width).Render(" Hasher CLI - Select Pipeline Type")
+	footer := footerStyle.Copy().Width(m.Width).Render("↑/↓ Navigate  Enter Select  Esc Back")
+
+	content := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.Width - 4).
+		Height(m.Height - 6).
+		Render(m.PipelineTypeMenu.View())
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 }
 
 // renderProgressView renders the progress indicator

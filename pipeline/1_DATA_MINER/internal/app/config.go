@@ -134,6 +134,7 @@ func ParseFlags() *Config {
 	flag.BoolVar(&config.HybridMode, "hybrid", config.HybridMode, "Run with hybrid embeddings")
 	flag.BoolVar(&config.NoArxivMode, "no-arxiv", config.NoArxivMode, "Skip arXiv mining")
 	flag.BoolVar(&config.GoatMode, "goat", config.GoatMode, "Use GOAT dataset from Hugging Face instead of arXiv")
+	flag.BoolVar(&config.DemoMode, "demo", config.DemoMode, "Generate hello world demo training frames (skips miner pipeline)")
 	flag.BoolVar(&config.DryRun, "dry-run", config.DryRun, "Show configuration without running")
 
 	// Environment configuration

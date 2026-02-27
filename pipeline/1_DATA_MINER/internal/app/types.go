@@ -72,6 +72,7 @@ type Config struct {
 	HybridMode     bool
 	NoArxivMode    bool
 	GoatMode       bool
+	DemoMode       bool
 	DryRun         bool
 
 	// Environment configuration

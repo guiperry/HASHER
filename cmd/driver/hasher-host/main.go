@@ -32,6 +32,7 @@ import (
 	"hasher/internal/discovery"
 	"hasher/internal/host"
 	"hasher/pkg/hashing/inference"
+	jitterpkg "hasher/pkg/hashing/jitter"
 	"hasher/pkg/hashing/methods/asic"
 	"hasher/pkg/hashing/neural"
 	"hasher/pkg/hashing/tokenizer"
@@ -122,7 +123,8 @@ type Orchestrator struct {
 	engine          *inference.RecursiveEngine
 	network         *neural.HashNetwork
 	cryptoModel     *transformer.HasherTransformer
-	miningNeuron    *neural.MiningNeuron // New field for Nonce generation
+	miningNeuron    *neural.MiningNeuron   // Mining neuron for proof-of-work attestation
+	jitterEngine    *jitterpkg.JitterEngine // Core inference engine: 21-pass associative loop
 	discoveryResult *discovery.DiscoveryResult
 	startTime       time.Time
 	mu              sync.RWMutex
@@ -530,13 +532,23 @@ func main() {
 		log.Printf("MiningNeuron created with InputDim=%d, OutputDim=%d", miningNeuronConfig.InputDim, miningNeuronConfig.OutputDim)
 	}
 
+	// Initialize JitterEngine — the core inference engine for the 21-pass temporal loop.
+	// This is the "brain" of the model: it navigates the 12-slot Semantic Maze using
+	// SHA-256 hashing to produce a Golden Nonce that IS the next token address.
+	// Software mode uses pure-Go SHA-256 (identical logic to the ASIC hardware path).
+	jitterCfg := jitterpkg.DefaultJitterConfig()
+	jitterCfg.Verbose = false
+	inferenceJitterEngine := jitterpkg.NewJitterEngine(jitterCfg)
+	log.Printf("JitterEngine initialized: %d-pass temporal loop (software SHA-256)", jitterCfg.PassCount)
+
 	// Create orchestrator
 	orch := &Orchestrator{
 		asicClient:         asicClient,
 		engine:             engine,
 		network:            network,
 		cryptoModel:        cryptoModel,
-		miningNeuron:       miningNeuron, // Add miningNeuron to orchestrator
+		miningNeuron:       miningNeuron,
+		jitterEngine:       inferenceJitterEngine,
 		discoveryResult:    discoveryResult,
 		startTime:          time.Now(),
 		deployer:           deployer,
@@ -1340,14 +1352,103 @@ func (o *Orchestrator) handleShutdown(c *gin.Context) {
 	}()
 }
 
-// handleChat handles crypto-transformer chat requests
+// buildContextFrame constructs a 12-slot TrainingFrame from the current inference context.
+// The slots encode the semantic state that guides the JitterEngine's 21-pass search.
+//
+// Slot layout (per HASHER architecture):
+//
+//	Slot 0:  Anchor  — topic fingerprint (XOR-rotate over all context tokens)
+//	Slot 1:  Subject — first token in the context
+//	Slot 2:  Action  — most recent token in the context
+//	Slot 3:  Entropy — flat XOR of all context tokens
+//	Slot 4:  POS     — part-of-speech hint (0 = unknown/NOUN)
+//	Slots 5-9:       — sliding window of the last 5 tokens
+//	Slot 10: Domain  — semantic domain (e.g. DOMAIN_PROSE)
+//	Slot 11: Length  — context window size
+func buildContextFrame(contextTokens []int, domain uint32) jitterpkg.TrainingFrame {
+	var slots [12]uint32
+
+	// Slot 0: Anchor — rotating XOR gives a unique fingerprint per context sequence
+	for _, t := range contextTokens {
+		slots[0] ^= uint32(t)
+		slots[0] = (slots[0] << 7) | (slots[0] >> 25) // left-rotate 7 bits
+	}
+
+	// Slot 1: Subject — first token
+	if len(contextTokens) > 0 {
+		slots[1] = uint32(contextTokens[0])
+	}
+
+	// Slot 2: Action — most recent token
+	if len(contextTokens) > 0 {
+		slots[2] = uint32(contextTokens[len(contextTokens)-1])
+	}
+
+	// Slot 3: Entropy — plain XOR of all tokens
+	for _, t := range contextTokens {
+		slots[3] ^= uint32(t)
+	}
+
+	// Slot 4: POS — 0 = NOUN (default when no tagger is available)
+	slots[4] = 0
+
+	// Slots 5-9: last 5 tokens from the context window
+	contextStart := 0
+	if len(contextTokens) > 5 {
+		contextStart = len(contextTokens) - 5
+	}
+	for i, t := range contextTokens[contextStart:] {
+		if i < 5 {
+			slots[5+i] = uint32(t)
+		}
+	}
+
+	// Slot 10: Domain
+	slots[10] = domain
+
+	// Slot 11: Context length
+	slots[11] = uint32(len(contextTokens))
+
+	return jitterpkg.TrainingFrame{
+		AsicSlots:     slots,
+		TargetTokenID: 0, // Unknown during inference; the JitterEngine determines this
+	}
+}
+
+// chatDetokenize converts a generated token sequence into a readable string.
+// Tokens in the printable ASCII range (32–126) map directly to their character.
+// Tokens outside that range are projected into the printable range for display.
+func chatDetokenize(tokenIDs []int) string {
+	var sb strings.Builder
+	for _, id := range tokenIDs {
+		if id >= 32 && id <= 126 {
+			sb.WriteRune(rune(id))
+		} else {
+			sb.WriteRune(rune((id % 95) + 32))
+		}
+	}
+	return sb.String()
+}
+
+// handleChat handles chat inference requests using the JitterEngine.
+//
+// Architecture (per HASHER specification):
+//   - Input text is tokenized into character-level token IDs.
+//   - For each output token a 12-slot TrainingFrame is built from the current context.
+//   - The frame is converted to an 80-byte Bitcoin-style header via ToBitcoinHeader().
+//   - The JitterEngine runs the 21-pass temporal associative search (pure-Go SHA-256 in
+//     software mode; ASIC hardware in hardware mode) to produce a GoldenNonceResult.
+//   - The golden nonce (first 4 bytes of the final hash) IS the token address in the
+//     Arrow Knowledge Base. If the FlashSearcher finds a match, it returns the token ID
+//     directly. Otherwise the nonce is projected into the vocabulary range as a fallback.
+//   - The full sequence of token IDs is detokenized to produce the response string.
 func (o *Orchestrator) handleChat(c *gin.Context) {
-	if o.cryptoModel == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "crypto-transformer not enabled"})
+	if o.jitterEngine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "JitterEngine not initialized"})
 		return
 	}
-	if o.miningNeuron == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mining neuron not initialized"})
+	if o.cryptoModel == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "crypto-transformer config not available"})
 		return
 	}
 
@@ -1359,84 +1460,70 @@ func (o *Orchestrator) handleChat(c *gin.Context) {
 
 	start := time.Now()
 
-	// FAST PATH: Software fallback mode - bypass heavy crypto-transformer for chat
-	if o.asicClient != nil && o.asicClient.IsUsingFallback() {
-		// Simple deterministic response for software mode (no mining, no transformer)
-		simpleResponse := "hello world" // Fixed response for testing
-		latency := time.Since(start)
-		c.JSON(http.StatusOK, ChatResponse{
-			Response:   simpleResponse,
-			TokenID:    1,
-			Confidence: 0.8,
-			LatencyMs:  float64(latency.Milliseconds()),
-			UsingASIC:  false,
-		})
-		return
-	}
-
-	// SLOW PATH: ASIC mode - use full crypto-transformer pipeline
-	// Convert message to token IDs using the tokenizer package
+	// Tokenize the input message into the character-level vocabulary.
 	inputTokenIDs := tokenizer.Tokenize(req.Message, o.cryptoModel.Config.VocabSize)
-
-	// Use provided context or initialize with input token IDs
-	context := req.Context
-	if len(context) == 0 {
-		context = inputTokenIDs
+	currentContext := req.Context
+	if len(currentContext) == 0 {
+		currentContext = inputTokenIDs
 	}
 
-	// Language Generation Loop
-	generatedTokens := make([]int, 0)
-	currentContext := context // Use context for subsequent token generation
-	var generatedResponse strings.Builder
-	const maxGenerationLen = 5 // Limit the length of the generated response (reduced for testing)
+	usingASIC := o.asicClient != nil && !o.asicClient.IsUsingFallback()
+	vocabSize := o.cryptoModel.Config.VocabSize
+
+	// Generation loop: one JitterEngine pass per output token.
+	const maxGenerationLen = 30
+	generatedTokens := make([]int, 0, maxGenerationLen)
 
 	for i := 0; i < maxGenerationLen; i++ {
-		// Generate the next token ID and its scores (projections) using the crypto-transformer
-		nextTokenID, tokenScores := o.cryptoModel.GenerateToken(currentContext, req.Temperature)
+		// Build the 12-slot semantic context frame from the current window.
+		frame := buildContextFrame(currentContext, jitterpkg.DOMAIN_PROSE)
+		header := frame.ToBitcoinHeader()
 
-		// If the token scores are not valid for mining (e.g., too few), break or handle error
-		if len(tokenScores) < len(o.miningNeuron.Weights) {
-			log.Printf("Warning: Transformer output tokenScores length (%d) is less than MiningNeuron.OutputDim (%d). Cannot generate nonce.", len(tokenScores), len(o.miningNeuron.Weights))
-			generatedResponse.WriteString("[ERR_PROJ_LEN]")
+		// Run the 21-pass temporal associative search.
+		// targetTokenID=0 means we are discovering the next token, not validating a known one.
+		result, err := o.jitterEngine.Execute21PassLoop(header, 0)
+		if err != nil {
+			log.Printf("Warning: JitterEngine failed at step %d: %v", i, err)
 			break
 		}
 
-		// Use MiningNeuron to convert tokenScores (projections) into a nonce
-		nonce, err := o.miningNeuron.Forward(tokenScores)
-		if err != nil {
-			log.Printf("ERROR: MiningNeuron forward pass failed: %v", err)
-			generatedResponse.WriteString("[ERR_NONCE_GEN]")
-			break // Stop generation on error
+		// The golden nonce IS the token address in the knowledge base (Reverse Lookup).
+		nextTokenID, found := o.jitterEngine.GetSearcher().LookupByNonce(result.Nonce, vocabSize)
+		if !found {
+			// Knowledge base miss: project the nonce into the vocabulary range.
+			// This produces valid, displayable output even before training data is loaded.
+			nextTokenID = int(result.Nonce % uint32(vocabSize))
 		}
 
-		// Detokenize the generated Nonce into a character
-		detokenizedChar := tokenizer.DetokenizeNonce(nonce, o.cryptoModel.Config.VocabSize)
-		generatedResponse.WriteString(detokenizedChar)
-
-		// Append the next token ID to the list of generated tokens
 		generatedTokens = append(generatedTokens, nextTokenID)
 
-		// Update the context for the next iteration (sliding window)
 		currentContext = append(currentContext, nextTokenID)
 		if len(currentContext) > o.cryptoModel.Config.ContextLen {
 			currentContext = currentContext[len(currentContext)-o.cryptoModel.Config.ContextLen:]
 		}
 
-		// Add a simple stop condition for demonstration
-		// In a real scenario, an explicit <EOS> token would be used
+		// Stop at sentence-ending punctuation.
 		if nextTokenID == int('.') || nextTokenID == int('?') || nextTokenID == int('!') {
 			break
 		}
 	}
 
+	// Final detokenization: convert the full token sequence back into text.
+	response := chatDetokenize(generatedTokens)
+
+	lastTokenID := 0
+	if len(generatedTokens) > 0 {
+		lastTokenID = generatedTokens[len(generatedTokens)-1]
+	}
+
 	latency := time.Since(start)
 
 	c.JSON(http.StatusOK, ChatResponse{
-		Response:   generatedResponse.String(),
-		TokenID:    generatedTokens[len(generatedTokens)-1], // Return last token ID for context building
-		Confidence: 0.8,                                     // Placeholder confidence (could be derived from tokenScores)
+		Response:   response,
+		TokenID:    lastTokenID,
+		Confidence: 0.8,
 		LatencyMs:  float64(latency.Milliseconds()),
-		UsingASIC:  o.asicClient != nil && !o.asicClient.IsUsingFallback(),
+		UsingASIC:  usingASIC,
 	})
 }
 

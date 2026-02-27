@@ -2,8 +2,8 @@ package app
 
 import (
 	"os"
-	"testing"
 	"reflect"
+	"testing"
 )
 
 func TestArrowNLPSerialization(t *testing.T) {
@@ -18,8 +18,8 @@ func TestArrowNLPSerialization(t *testing.T) {
 			Embedding:    []float32{0.1, 0.2, 0.3},
 			Tokens:       []string{"Linguistics", "test", "."},
 			TokenOffsets: []int32{0, 12, 16},
-			POSTags:      []uint8{0x01, 0x01, 0x0F},
-			Tenses:       []uint8{0, 0, 0},
+			POSTags:      []int{0x01, 0x01, 0x0F},
+			Tenses:       []int{0, 0, 0},
 			DepHashes:    []uint32{123, 456, 789},
 		},
 	}

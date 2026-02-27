@@ -249,6 +249,32 @@ func (fs *FlashSearcher) Size() int {
 	return len(fs.knowledgeBase)
 }
 
+// LookupByNonce performs the Reverse Lookup step of the HASHER inference pipeline.
+// Given the golden nonce (first 4 bytes of the JitterEngine's final hash), it finds the
+// training frame whose TargetTokenID matches the projected nonce and returns that token ID.
+// This implements the "hash → word" lookup described in the architecture specification:
+// the Result_Hash IS the address of the next token in the Arrow Knowledge Base.
+// Returns 0, false when the knowledge base is empty or contains no matching frame.
+func (fs *FlashSearcher) LookupByNonce(nonce uint32, vocabSize int) (int, bool) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if len(fs.knowledgeBase) == 0 {
+		return 0, false
+	}
+
+	// Project the nonce into the vocabulary range for comparison
+	targetID := int32(nonce % uint32(vocabSize))
+
+	for _, frame := range fs.knowledgeBase {
+		if frame.TargetTokenID == targetID {
+			return int(frame.TargetTokenID), true
+		}
+	}
+
+	return 0, false
+}
+
 // GenerateDefaultJitter creates a deterministic default jitter
 func (fs *FlashSearcher) GenerateDefaultJitter(key uint32) JitterVector {
 	salt := uint32(0x9E3779B9)
