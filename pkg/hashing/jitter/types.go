@@ -248,6 +248,9 @@ type TrainingFrame struct {
 	// 12 ASIC slots (neural feature vector)
 	AsicSlots [12]uint32 `json:"asic_slots"`
 
+	// Original token sequence for semantic matching
+	TokenSequence []int `json:"token_sequence,omitempty"`
+
 	// Target token to predict
 	TargetTokenID int32 `json:"target_token_id"`
 

@@ -171,7 +171,7 @@ func RunDemoFrameGenerator(config *Config) error {
 }
 
 // buildHelloWorldFrames creates a minimal hello-world conversation dataset.
-// Token IDs use cl100k_base values mod 1000, matching the trainer's expectations.
+// Token IDs use cl100k_base values.
 func buildHelloWorldFrames() []demoTrainingFrame {
 	// Feature vector: [token_sequence_packed, target, zeros...]
 	// The trainer uses these 12 slots as the ASIC input header.
@@ -183,26 +183,46 @@ func buildHelloWorldFrames() []demoTrainingFrame {
 	}
 
 	return []demoTrainingFrame{
-		// "Hello" (9906 % 1000 = 906) → " world" (1917 % 1000 = 917)
+		// Pattern 1: Basic "Hello" (9906) -> " world" (1917)
 		{SourceFile: "demo.txt", ChunkID: 1, WindowStart: 0,
-			TokenSequence: []int{906}, TargetToken: 917,
-			FeatureVector: makeFeatureVector(906, 917)},
-		// " world" → "!" (0)
+			TokenSequence: []int{9906}, TargetToken: 1917,
+			FeatureVector: makeFeatureVector(9906, 1917)},
+		// Pattern 2: " world" (1917) -> "!" (0)
 		{SourceFile: "demo.txt", ChunkID: 2, WindowStart: 1,
-			TokenSequence: []int{906, 917}, TargetToken: 0,
-			FeatureVector: makeFeatureVector(917, 0)},
-		// "What" (3923 % 1000 = 923) → " is" (374)
+			TokenSequence: []int{1917}, TargetToken: 0,
+			FeatureVector: makeFeatureVector(1917, 0)},
+		// Pattern 3: "world" (no space, 14957) -> "!" (0)
 		{SourceFile: "demo.txt", ChunkID: 3, WindowStart: 0,
-			TokenSequence: []int{923}, TargetToken: 374,
-			FeatureVector: makeFeatureVector(923, 374)},
-		// " is" → " your" (701)
-		{SourceFile: "demo.txt", ChunkID: 4, WindowStart: 1,
-			TokenSequence: []int{923, 374}, TargetToken: 701,
+			TokenSequence: []int{14957}, TargetToken: 0,
+			FeatureVector: makeFeatureVector(14957, 0)},
+		// Pattern 4: "Hasher" (6504, 261) -> " world" (1917)
+		{SourceFile: "demo.txt", ChunkID: 4, WindowStart: 0,
+			TokenSequence: []int{6504, 261}, TargetToken: 1917,
+			FeatureVector: makeFeatureVector(261, 1917)},
+		// Pattern 5: "hasher" (8460, 261) -> " world" (1917)
+		{SourceFile: "demo.txt", ChunkID: 5, WindowStart: 0,
+			TokenSequence: []int{8460, 261}, TargetToken: 1917,
+			FeatureVector: makeFeatureVector(261, 1917)},
+		// Pattern 6: "What" (3923) -> " is" (374)
+		{SourceFile: "demo.txt", ChunkID: 6, WindowStart: 0,
+			TokenSequence: []int{3923}, TargetToken: 374,
+			FeatureVector: makeFeatureVector(3923, 374)},
+		// Pattern 7: " is" (374) -> " your" (701)
+		{SourceFile: "demo.txt", ChunkID: 7, WindowStart: 1,
+			TokenSequence: []int{374}, TargetToken: 701,
 			FeatureVector: makeFeatureVector(374, 701)},
-		// " your" → " name" (836)
-		{SourceFile: "demo.txt", ChunkID: 5, WindowStart: 2,
-			TokenSequence: []int{923, 374, 701}, TargetToken: 836,
+		// Pattern 8: " your" (701) -> " name" (836)
+		{SourceFile: "demo.txt", ChunkID: 8, WindowStart: 2,
+			TokenSequence: []int{701}, TargetToken: 836,
 			FeatureVector: makeFeatureVector(701, 836)},
+		// Pattern 9: " name" (836) -> "?" (30)
+		{SourceFile: "demo.txt", ChunkID: 9, WindowStart: 3,
+			TokenSequence: []int{836}, TargetToken: 30,
+			FeatureVector: makeFeatureVector(836, 30)},
+		// Pattern 10: "Whats" (59175) -> " your" (701)
+		{SourceFile: "demo.txt", ChunkID: 10, WindowStart: 0,
+			TokenSequence: []int{59175}, TargetToken: 701,
+			FeatureVector: makeFeatureVector(59175, 701)},
 	}
 }
 

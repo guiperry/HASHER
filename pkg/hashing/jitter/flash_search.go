@@ -275,6 +275,56 @@ func (fs *FlashSearcher) LookupByNonce(nonce uint32, vocabSize int) (int, bool) 
 	return 0, false
 }
 
+// LookupByContext performs a semantic lookup based on the current context tokens.
+// This provides a deterministic "Exact Match" path for known training patterns,
+// ensuring the system can accurately reproduce sequences it has been explicitly trained on.
+func (fs *FlashSearcher) LookupByContext(context []int) (int, bool) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if len(fs.knowledgeBase) == 0 || len(context) == 0 {
+		return 0, false
+	}
+
+	bestMatchID := -1
+	maxMatchLen := 0
+	maxStartPos := -1
+
+	for _, frame := range fs.knowledgeBase {
+		if len(frame.TokenSequence) == 0 {
+			continue
+		}
+
+		// Try to find the frame's token sequence as a sub-sequence within the context
+		for start := 0; start <= len(context)-len(frame.TokenSequence); start++ {
+			match := true
+			for i, tok := range frame.TokenSequence {
+				if context[start+i] != tok {
+					match = false
+					break
+				}
+			}
+
+			if match {
+				// We prioritize:
+				// 1. Longer matches (more specific)
+				// 2. Later start positions (more recent context)
+				if len(frame.TokenSequence) > maxMatchLen || (len(frame.TokenSequence) == maxMatchLen && start > maxStartPos) {
+					maxMatchLen = len(frame.TokenSequence)
+					maxStartPos = start
+					bestMatchID = int(frame.TargetTokenID)
+				}
+			}
+		}
+	}
+
+	if bestMatchID != -1 {
+		return bestMatchID, true
+	}
+
+	return 0, false
+}
+
 // GenerateDefaultJitter creates a deterministic default jitter
 func (fs *FlashSearcher) GenerateDefaultJitter(key uint32) JitterVector {
 	salt := uint32(0x9E3779B9)

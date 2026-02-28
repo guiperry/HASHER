@@ -7,9 +7,11 @@ import (
 )
 
 type DeviceConfig struct {
-	IP       string
-	Password string
-	Username string
+	IP          string
+	Password    string
+	Username    string
+	FramesDir   string // path to training frame JSON files for FlashSearcher
+	CGMinerHost string // CGMiner API host (e.g. 192.168.12.151); empty = disabled
 }
 
 var (
@@ -43,6 +45,19 @@ func LoadDeviceConfig() (*DeviceConfig, error) {
 	if username := os.Getenv("DEVICE_USERNAME"); username != "" {
 		cfg.Username = username
 	}
+	if framesDir := os.Getenv("FRAMES_DIR"); framesDir != "" {
+		cfg.FramesDir = framesDir
+	}
+	if cgminerHost := os.Getenv("CGMINER_HOST"); cgminerHost != "" {
+		cfg.CGMinerHost = cgminerHost
+	}
+
+	// Set default FramesDir if still empty
+	if cfg.FramesDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cfg.FramesDir = filepath.Join(home, ".local", "share", "hasher", "data", "frames")
+		}
+	}
 
 	deviceConfig = cfg
 	configLoaded = true
@@ -70,6 +85,10 @@ func parseEnvFile(content string, cfg *DeviceConfig) {
 			cfg.Password = value
 		case "DEVICE_USERNAME":
 			cfg.Username = value
+		case "FRAMES_DIR":
+			cfg.FramesDir = value
+		case "CGMINER_HOST":
+			cfg.CGMinerHost = value
 		}
 	}
 }

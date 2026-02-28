@@ -92,7 +92,7 @@ var (
 
 	// Crypto-transformer configuration
 	enableCrypto     = flag.Bool("crypto", true, "enable crypto-transformer")
-	vocabSize        = flag.Int("vocab-size", 1000, "transformer vocabulary size")
+	vocabSize        = flag.Int("vocab-size", 100256, "transformer vocabulary size")
 	embedDim         = flag.Int("embed-dim", 256, "transformer embedding dimension")
 	numLayers        = flag.Int("num-layers", 4, "transformer number of layers")
 	numHeads         = flag.Int("num-heads", 8, "transformer attention heads")
@@ -553,15 +553,27 @@ func main() {
 
 	// Load training frames into the FlashSearcher knowledge base.
 	// This enables the 3-zone associative lookup and Reverse Lookup (golden nonce → token).
-	if *framesDir != "" {
-		n, err := jitterpkg.LoadFromDirectory(inferenceJitterEngine.GetSearcher(), *framesDir)
+	actualFramesDir := *framesDir
+	if actualFramesDir == "" {
+		// Try default location
+		homeDir, _ := os.UserHomeDir()
+		if homeDir != "" {
+			defaultFramesDir := filepath.Join(homeDir, ".local", "share", "hasher", "data", "frames")
+			if _, err := os.Stat(defaultFramesDir); err == nil {
+				actualFramesDir = defaultFramesDir
+			}
+		}
+	}
+
+	if actualFramesDir != "" {
+		n, err := jitterpkg.LoadFromDirectory(inferenceJitterEngine.GetSearcher(), actualFramesDir)
 		if err != nil {
 			log.Printf("Warning: knowledge base load error: %v", err)
 		} else {
-			log.Printf("Knowledge base: loaded %d training frames from %s", n, *framesDir)
+			log.Printf("Knowledge base: loaded %d training frames from %s", n, actualFramesDir)
 		}
 	} else {
-		log.Printf("Knowledge base: no --frames-dir specified; FlashSearcher starts empty")
+		log.Printf("Knowledge base: no --frames-dir specified or found; FlashSearcher starts empty")
 	}
 
 	// Connect to the CGMiner API for ASIC-backed final nonce mining.
@@ -1454,21 +1466,6 @@ func buildContextFrame(contextTokens []int, domain uint32) jitterpkg.TrainingFra
 	}
 }
 
-// chatDetokenize converts a generated token sequence into a readable string.
-// Tokens in the printable ASCII range (32–126) map directly to their character.
-// Tokens outside that range are projected into the printable range for display.
-func chatDetokenize(tokenIDs []int) string {
-	var sb strings.Builder
-	for _, id := range tokenIDs {
-		if id >= 32 && id <= 126 {
-			sb.WriteRune(rune(id))
-		} else {
-			sb.WriteRune(rune((id % 95) + 32))
-		}
-	}
-	return sb.String()
-}
-
 // handleChat handles chat inference requests using the JitterEngine.
 //
 // Architecture (per HASHER specification):
@@ -1499,7 +1496,7 @@ func (o *Orchestrator) handleChat(c *gin.Context) {
 
 	start := time.Now()
 
-	// Tokenize the input message into the character-level vocabulary.
+	// Tokenize the input message using Tiktoken (consistent with pipeline).
 	inputTokenIDs := tokenizer.Tokenize(req.Message, o.cryptoModel.Config.VocabSize)
 	currentContext := req.Context
 	if len(currentContext) == 0 {
@@ -1510,43 +1507,70 @@ func (o *Orchestrator) handleChat(c *gin.Context) {
 	vocabSize := o.cryptoModel.Config.VocabSize
 
 	// Generation loop: one JitterEngine pass per output token.
-	const maxGenerationLen = 30
+	const maxGenerationLen = 20
 	generatedTokens := make([]int, 0, maxGenerationLen)
+	consecutiveMisses := 0
+
+	// Check if knowledge base is empty before starting generation
+	if o.jitterEngine.GetSearcher().Size() == 0 {
+		c.JSON(http.StatusOK, ChatResponse{
+			Response:   "I am ready, but my knowledge base is currently empty. Please run the Data Pipeline (menu option 1) to train me on some data first.",
+			TokenID:    0,
+			Confidence: 0.0,
+			LatencyMs:  float64(time.Since(start).Milliseconds()),
+			UsingASIC:  usingASIC,
+		})
+		return
+	}
 
 	for i := 0; i < maxGenerationLen; i++ {
-		// Build the 12-slot semantic context frame from the current window.
-		frame := buildContextFrame(currentContext, jitterpkg.DOMAIN_PROSE)
-		header := frame.ToBitcoinHeader()
+		// First, check if the current context matches a known pattern in the knowledge base.
+		// This provides a deterministic "Exact Match" path for high-fidelity responses.
+		nextTokenID, found := o.jitterEngine.GetSearcher().LookupByContext(currentContext)
 
-		// Run the 21-pass temporal associative search.
-		// targetTokenID=0 means we are discovering the next token, not validating a known one.
-		result, err := o.jitterEngine.Execute21PassLoop(header, 0)
-		if err != nil {
-			log.Printf("Warning: JitterEngine failed at step %d: %v", i, err)
-			break
-		}
+		if found {
+			consecutiveMisses = 0
+		} else {
+			// If no exact match is found, use the probabilistic path via the JitterEngine.
+			// This represents the "Discovery" mode where the system searches for associations.
 
-		// Determine the golden nonce for this step.
-		// If CGMiner is available, the ASIC mines the 21-pass-refined header to produce
-		// a hardware-attested nonce (500 GH/s hash velocity).
-		// Otherwise the software 21-pass result nonce is used.
-		goldenNonce := result.Nonce
-		if o.cgminerMethod != nil && o.cgminerMethod.IsAvailable() {
-			asicNonce, _, mineErr := o.cgminerMethod.MineForGoldenNonce(header)
-			if mineErr != nil {
-				log.Printf("Warning: CGMiner mining failed at step %d: %v (using software nonce)", i, mineErr)
+			// Build the 12-slot semantic context frame from the current window.
+			frame := buildContextFrame(currentContext, jitterpkg.DOMAIN_PROSE)
+			header := frame.ToBitcoinHeader()
+
+			// Run the 21-pass temporal associative search.
+			result, err := o.jitterEngine.Execute21PassLoop(header, 0)
+			if err != nil {
+				log.Printf("Warning: JitterEngine failed at step %d: %v", i, err)
+				break
+			}
+
+			// Determine the golden nonce for this step.
+			goldenNonce := result.Nonce
+			if o.cgminerMethod != nil && o.cgminerMethod.IsAvailable() {
+				asicNonce, _, mineErr := o.cgminerMethod.MineForGoldenNonce(header)
+				if mineErr != nil {
+					log.Printf("Warning: CGMiner mining failed at step %d: %v (using software nonce)", i, mineErr)
+				} else {
+					goldenNonce = asicNonce
+					usingASIC = true
+				}
+			}
+
+			// The golden nonce IS the token address in the knowledge base (Reverse Lookup).
+			nextTokenID, found = o.jitterEngine.GetSearcher().LookupByNonce(goldenNonce, vocabSize)
+			if !found {
+				// Knowledge base miss: project the nonce into the vocabulary range.
+				nextTokenID = int(goldenNonce % uint32(vocabSize))
+				consecutiveMisses++
 			} else {
-				goldenNonce = asicNonce
-				usingASIC = true
+				consecutiveMisses = 0
 			}
 		}
 
-		// The golden nonce IS the token address in the knowledge base (Reverse Lookup).
-		nextTokenID, found := o.jitterEngine.GetSearcher().LookupByNonce(goldenNonce, vocabSize)
-		if !found {
-			// Knowledge base miss: project the nonce into the vocabulary range.
-			// This produces valid, displayable output even before training data is loaded.
-			nextTokenID = int(goldenNonce % uint32(vocabSize))
+		// Stop if we have too many consecutive misses (preventing long gibberish)
+		if consecutiveMisses > 3 {
+			break
 		}
 
 		generatedTokens = append(generatedTokens, nextTokenID)
@@ -1556,14 +1580,22 @@ func (o *Orchestrator) handleChat(c *gin.Context) {
 			currentContext = currentContext[len(currentContext)-o.cryptoModel.Config.ContextLen:]
 		}
 
-		// Stop at sentence-ending punctuation.
-		if nextTokenID == int('.') || nextTokenID == int('?') || nextTokenID == int('!') {
+		// Stop at sentence-ending punctuation (Tiktoken IDs: . = 13, ! = 0, ? = 30)
+		// Only break if we've generated at least 2 tokens to avoid premature cut-off
+		if len(generatedTokens) >= 2 && (nextTokenID == 13 || nextTokenID == 0 || nextTokenID == 30) {
 			break
 		}
 	}
 
 	// Final detokenization: convert the full token sequence back into text.
-	response := chatDetokenize(generatedTokens)
+	// If no tokens were generated (e.g. all nonces missed the knowledge base),
+	// return a diagnostic message rather than an empty string.
+	var response string
+	if len(generatedTokens) == 0 {
+		response = "[No match found — input context not yet in the knowledge base. Run the Data Pipeline (menu option 1) on more data.]"
+	} else {
+		response = tokenizer.Detokenize(generatedTokens)
+	}
 
 	lastTokenID := 0
 	if len(generatedTokens) > 0 {

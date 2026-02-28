@@ -3,50 +3,56 @@ package tokenizer
 import (
 	"fmt"
 	"strings"
+
+	"github.com/pkoukk/tiktoken-go"
 )
 
-// Tokenize converts a string into a slice of integer token IDs.
-// It uses a simple character-level mapping, where each character's ASCII value
-// is mapped to a token ID modulo vocabSize.
+// Tokenize converts a string into a slice of integer token IDs using Tiktoken (cl100k_base).
+// This matches the tokenization used in the data pipeline.
 func Tokenize(input string, vocabSize int) []int {
-	tokenIDs := make([]int, len(input))
-	for i, char := range input {
-		tokenIDs[i] = int(char) % vocabSize
+	tkm, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+		// Fallback to character-level if tiktoken fails
+		tokenIDs := make([]int, len(input))
+		for i, char := range input {
+			tokenIDs[i] = int(char)
+		}
+		return tokenIDs
 	}
-	return tokenIDs
+
+	tokens := tkm.Encode(input, nil, nil)
+	return tokens
 }
 
 // Detokenize converts a slice of integer token IDs back into a string.
-// It assumes token IDs are ASCII values. Non-printable ASCII characters
-// or out-of-range IDs are represented by a placeholder.
 func Detokenize(tokenIDs []int) string {
-	var result strings.Builder
-	for _, id := range tokenIDs {
-		if id >= 32 && id <= 126 { // Printable ASCII range
-			result.WriteRune(rune(id))
-		} else {
-			// For non-printable or special tokens, print a placeholder
-			result.WriteString(fmt.Sprintf("[%d]", id))
+	tkm, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+		// Fallback to ASCII
+		var result strings.Builder
+		for _, id := range tokenIDs {
+			if id >= 32 && id <= 126 {
+				result.WriteRune(rune(id))
+			} else {
+				result.WriteString(fmt.Sprintf("[%d]", id))
+			}
 		}
+		return result.String()
 	}
-	return result.String()
+
+	return tkm.Decode(tokenIDs)
 }
 
 // DetokenizeChar converts a single integer token ID into a string character.
-// It assumes the token ID is an ASCII value. Non-printable ASCII characters
-// or out-of-range IDs are represented by a placeholder "[?]"
 func DetokenizeChar(id int) string {
-	if id >= 32 && id <= 126 { // Printable ASCII range
-		return fmt.Sprintf("%c", rune(id))
-	}
-	return "[?]"
+	return Detokenize([]int{id})
 }
 
-// DetokenizeNonce converts a 32-bit Nonce into a character.
-// It treats the Nonce as a raw token ID, optionally taking the modulo of the vocabSize,
-// and then uses the existing character-level detokenization.
+// DetokenizeNonce converts a 32-bit Nonce into a character/word.
 func DetokenizeNonce(nonce uint32, vocabSize int) string {
-	// Use the nonce as a token ID, modulo vocabSize
-	tokenID := int(nonce) % vocabSize
+	tokenID := int(nonce)
+	if vocabSize > 0 {
+		tokenID = tokenID % vocabSize
+	}
 	return DetokenizeChar(tokenID)
 }

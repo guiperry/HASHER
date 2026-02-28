@@ -1657,6 +1657,13 @@ func (m *Model) updateChatView() {
 		content += wrappedMsg + "\n\n"
 	}
 	m.ChatView.SetValue(content)
+	
+	// Scroll to bottom by moving cursor down for each line
+	lines := strings.Split(content, "\n")
+	for i := 0; i < len(lines); i++ {
+		m.ChatView.CursorDown()
+	}
+	
 	m.ChatContent = content
 }
 
@@ -1670,6 +1677,13 @@ func (m *Model) updateLogView() {
 		content += wrappedLog + "\n"
 	}
 	m.LogView.SetValue(content)
+	
+	// Scroll to bottom by moving cursor down for each line
+	lines := strings.Split(content, "\n")
+	for i := 0; i < len(lines); i++ {
+		m.LogView.CursorDown()
+	}
+	
 	m.LogContent = content
 
 	// Also update init view if we're in initialization mode
@@ -1731,22 +1745,39 @@ func (m Model) updateResourceData() tea.Cmd {
 	})
 }
 
-// checkServerHealth periodically checks if hasher-host is running
+// checkServerHealth periodically checks if hasher-host is running.
+// It reads /tmp/hasher-host.port to discover the dynamic port chosen by hasher-host
+// (which may differ from the default 8080 if Apache or another service occupies it).
 func (m Model) checkServerHealth() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		if m.APIClient != nil {
-			health, err := m.APIClient.GetHealth()
-			if err == nil && health.Status != "" {
-				// Server is ready
-				if !m.ServerReady {
-					return ServerReadyMsg{Ready: true, Starting: false, Port: 0}
-				}
-			} else {
-				// Server process exists but not ready yet
-				if m.ServerStarting && !m.ServerReady {
-					return ServerReadyMsg{Ready: false, Starting: true, Port: 0}
-				}
+		// Read the dynamic port written by hasher-host at startup.
+		portBytes, err := os.ReadFile("/tmp/hasher-host.port")
+		if err != nil {
+			// Port file not yet written — server is still starting.
+			if m.ServerStarting && !m.ServerReady {
+				return ServerReadyMsg{Ready: false, Starting: true, Port: 0}
 			}
+			return nil
+		}
+
+		port, err := strconv.Atoi(strings.TrimSpace(string(portBytes)))
+		if err != nil || port <= 0 {
+			return nil
+		}
+
+		// Probe health at the real dynamic port.
+		httpClient := &http.Client{Timeout: 2 * time.Second}
+		resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", port))
+		if err != nil {
+			if m.ServerStarting && !m.ServerReady {
+				return ServerReadyMsg{Ready: false, Starting: true, Port: 0}
+			}
+			return nil
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == 200 && !m.ServerReady {
+			return ServerReadyMsg{Ready: true, Starting: false, Port: port}
 		}
 		return nil
 	})
@@ -1793,6 +1824,17 @@ func (m Model) handleInput(input string) tea.Cmd {
 	}
 	if strings.HasPrefix(input, "/rule") {
 		return m.handleRuleCommand(input)
+	}
+
+	// Guard: refuse to call the API when the server isn't ready or the client is unset.
+	// This prevents hitting Apache (or any other service on the default port).
+	if !m.ServerReady || m.APIClient == nil {
+		return func() tea.Msg {
+			errMsg := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(
+				"Server not ready. Please start hasher-host first (menu option 3).",
+			)
+			return AppendChatMsg{Msg: errMsg}
+		}
 	}
 
 	userMsg := userMessageStyle.Render("You: " + input)
@@ -2919,6 +2961,21 @@ func (m *Model) startHasherHost() tea.Cmd {
 			// No device configuration, enable discovery for auto-detection
 			args = append(args, "--discover=true")
 			args = append(args, "--auto-deploy=true")
+		}
+
+		// Knowledge base: pass training frames directory if configured.
+		// Without this, FlashSearcher is empty and inference produces random output.
+		if deviceConfig != nil && deviceConfig.FramesDir != "" {
+			args = append(args, "--frames-dir="+deviceConfig.FramesDir)
+			logMsg += fmt.Sprintf("Knowledge base: %s\n", deviceConfig.FramesDir)
+		} else {
+			logMsg += "Warning: FRAMES_DIR not set — inference will produce random output until training data is loaded.\n"
+		}
+
+		// CGMiner ASIC integration: pass host if configured.
+		if deviceConfig != nil && deviceConfig.CGMinerHost != "" {
+			args = append(args, "--cgminer-host="+deviceConfig.CGMinerHost)
+			logMsg += fmt.Sprintf("CGMiner: %s:4028\n", deviceConfig.CGMinerHost)
 		}
 
 		// Start hasher-host with configured arguments
