@@ -24,11 +24,10 @@ func TestTensorPacker_PackFrame(t *testing.T) {
 	memory := []uint32{0x11111111, 0x22222222, 0x33333333}
 	tokenPos := uint16(42)
 
-	slots := tp.PackFrame(embedding, pos, tense, depHash, memory, tokenPos)
+	slots := tp.PackFrame(embedding, pos, tense, depHash, memory, tokenPos, "", "")
 
-	// Verify Slot 0 (Identity): Should contain quantized embedding[0] and embedding[1]
-	// 1.0 -> 0xFFFF, -1.0 -> 0x0000
-	expectedSlot0 := (uint32(0xFFFF) << 16) | uint32(0x0000)
+	// Verify Slot 0 (Identity): quantizeFloatToUint32(1.0) == 0xFFFFFFFF
+	expectedSlot0 := uint32(0xFFFFFFFF)
 	if slots[0] != expectedSlot0 {
 		t.Errorf("Slot 0 (Identity) = 0x%08X; want 0x%08X", slots[0], expectedSlot0)
 	}

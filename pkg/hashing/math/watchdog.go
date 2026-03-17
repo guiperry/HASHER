@@ -2,9 +2,36 @@ package math
 
 import (
 	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
 
 	"hasher/pkg/hashing/jitter"
 )
+
+// WatchdogRule describes a forbidden role-sequence loaded from a YAML schema.
+type WatchdogRule struct {
+	PrevRole      uint32   `yaml:"prev_role"`
+	ForbiddenNext []uint32 `yaml:"forbidden_next"`
+}
+
+// watchdogSchemaFile is the minimal YAML structure needed to extract rules.
+type watchdogSchemaFile struct {
+	ValidationRules []WatchdogRule `yaml:"validation_rules"`
+}
+
+// LoadWatchdogRulesFromYAML reads validation_rules from a slot-schema YAML file.
+func LoadWatchdogRulesFromYAML(path string) ([]WatchdogRule, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("watchdog schema load: %w", err)
+	}
+	var schema watchdogSchemaFile
+	if err := yaml.Unmarshal(data, &schema); err != nil {
+		return nil, fmt.Errorf("watchdog schema parse: %w", err)
+	}
+	return schema.ValidationRules, nil
+}
 
 type ValidationResult struct {
 	Valid          bool
@@ -17,6 +44,7 @@ type InferenceWatchdog struct {
 	subdomain  uint32
 	strictMode bool
 	prevPOS    uint32
+	rules      []WatchdogRule // nil → hard-coded fallback
 }
 
 func NewInferenceWatchdog(subdomain uint32) *InferenceWatchdog {
@@ -27,6 +55,19 @@ func NewInferenceWatchdog(subdomain uint32) *InferenceWatchdog {
 		subdomain:  subdomain,
 		strictMode: true,
 		prevPOS:    0,
+	}
+}
+
+// NewWatchdogWithRules creates a watchdog using schema-loaded validation rules.
+func NewWatchdogWithRules(subdomain uint32, rules []WatchdogRule) *InferenceWatchdog {
+	if subdomain == 0 {
+		subdomain = SUBDOMAIN_ARITHMETIC
+	}
+	return &InferenceWatchdog{
+		subdomain:  subdomain,
+		strictMode: true,
+		prevPOS:    0,
+		rules:      rules,
 	}
 }
 
@@ -45,23 +86,45 @@ func (w *InferenceWatchdog) ValidateMathStep(currentHash uint32, header [12]uint
 	currentPOS := header[4] & 0xFF
 
 	if w.prevPOS != 0 {
-		if w.prevPOS == ROLE_OPERATOR && currentPOS != ROLE_VARIABLE && currentPOS != ROLE_INTEGER && currentPOS != ROLE_DECIMAL {
-			result.Valid = false
-			result.Error = "HALLUCINATION DETECTED: Operator cannot be followed by non-value"
-			result.Details["prevRole"] = GetRoleName(w.prevPOS)
-			result.Details["currentRole"] = GetRoleName(currentPOS)
-			result.LogicIntegrity = 0.0
-			return result
-		}
-
-		if w.prevPOS == ROLE_RELATION {
-			if currentPOS == ROLE_OPERATOR || currentPOS == ROLE_FUNCTION {
+		if len(w.rules) > 0 {
+			// Schema-driven rules: check every loaded rule
+			for _, rule := range w.rules {
+				if w.prevPOS != rule.PrevRole {
+					continue
+				}
+				for _, forbidden := range rule.ForbiddenNext {
+					if currentPOS == forbidden {
+						result.Valid = false
+						result.Error = fmt.Sprintf(
+							"HALLUCINATION DETECTED: role sequence %s → %s is forbidden",
+							GetRoleName(w.prevPOS), GetRoleName(currentPOS),
+						)
+						result.Details["prevRole"] = GetRoleName(w.prevPOS)
+						result.Details["currentRole"] = GetRoleName(currentPOS)
+						result.LogicIntegrity = 0.0
+						return result
+					}
+				}
+			}
+		} else {
+			// Hard-coded fallback rules (used when no schema is loaded)
+			if w.prevPOS == ROLE_OPERATOR && currentPOS != ROLE_VARIABLE && currentPOS != ROLE_INTEGER && currentPOS != ROLE_DECIMAL {
 				result.Valid = false
-				result.Error = "HALLUCINATION DETECTED: Relation cannot be followed by operator/function"
+				result.Error = "HALLUCINATION DETECTED: Operator cannot be followed by non-value"
 				result.Details["prevRole"] = GetRoleName(w.prevPOS)
 				result.Details["currentRole"] = GetRoleName(currentPOS)
 				result.LogicIntegrity = 0.0
 				return result
+			}
+			if w.prevPOS == ROLE_RELATION {
+				if currentPOS == ROLE_OPERATOR || currentPOS == ROLE_FUNCTION {
+					result.Valid = false
+					result.Error = "HALLUCINATION DETECTED: Relation cannot be followed by operator/function"
+					result.Details["prevRole"] = GetRoleName(w.prevPOS)
+					result.Details["currentRole"] = GetRoleName(currentPOS)
+					result.LogicIntegrity = 0.0
+					return result
+				}
 			}
 		}
 	}
@@ -89,9 +152,7 @@ func (w *InferenceWatchdog) ValidateDerivation(steps []DerivationStep) Validatio
 
 	validSteps := 0
 	for i, step := range steps {
-		header := step.Header
-		validation := w.ValidateMathStep(step.Hash, header)
-
+		validation := w.ValidateMathStep(step.Hash, step.Header)
 		if !validation.Valid {
 			result.Valid = false
 			result.Error = fmt.Sprintf("Step %d: %s", i, validation.Error)

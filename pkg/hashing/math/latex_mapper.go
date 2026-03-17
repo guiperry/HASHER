@@ -58,46 +58,42 @@ func (m *LaTeXMapper) MapLaTeXToTensor(latexExpr string, subdomain uint32) [12]u
 }
 
 func (m *LaTeXMapper) TokenizeLaTeX(latex string) []Token {
-	commands := extractLatexCommands(latex)
-	for _, cmd := range commands {
-		role := determineRole(cmd)
-		if role != ROLE_VARIABLE {
-			return []Token{{Text: cmd, Role: role}}
+	if latex == "" {
+		return nil
+	}
+
+	var result []Token
+	cmdRe := regexp.MustCompile(`\\[a-zA-Z]+`)
+	lastEnd := 0
+
+	for _, loc := range cmdRe.FindAllStringIndex(latex, -1) {
+		// Tokenize plain text that precedes this command
+		plain := latex[lastEnd:loc[0]]
+		for _, t := range extractTokens(plain) {
+			if t = strings.TrimSpace(t); t != "" {
+				result = append(result, Token{Text: t, Role: determineRole(t)})
+			}
+		}
+		// Tokenize the command itself (backslash retained — patterns match it)
+		cmd := latex[loc[0]:loc[1]]
+		result = append(result, Token{Text: cmd, Role: determineRole(cmd)})
+		lastEnd = loc[1]
+	}
+
+	// Tokenize any remaining plain text after the last command
+	if lastEnd < len(latex) {
+		for _, t := range extractTokens(latex[lastEnd:]) {
+			if t = strings.TrimSpace(t); t != "" {
+				result = append(result, Token{Text: t, Role: determineRole(t)})
+			}
 		}
 	}
 
-	latex = normalizeLatex(latex)
-	tokens := extractTokens(latex)
-
-	var result []Token
-	for _, t := range tokens {
-		if len(strings.TrimSpace(t)) == 0 {
-			continue
-		}
-		role := determineRole(t)
-		result = append(result, Token{Text: t, Role: role})
+	if len(result) == 0 {
+		result = []Token{{Text: latex, Role: ROLE_VARIABLE}}
 	}
 
 	return result
-}
-
-func normalizeLatex(s string) string {
-	s = strings.ReplaceAll(s, "\\ ", " ")
-	s = strings.ReplaceAll(s, "\\left", "")
-	s = strings.ReplaceAll(s, "\\right", "")
-	s = strings.ReplaceAll(s, "\\", "")
-	s = strings.TrimSpace(s)
-	return s
-}
-
-func extractLatexCommands(s string) []string {
-	var commands []string
-	re := regexp.MustCompile(`\\[a-zA-Z]+`)
-	matches := re.FindAllString(s, -1)
-	for _, m := range matches {
-		commands = append(commands, m)
-	}
-	return commands
 }
 
 func extractTokens(s string) []string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"strings"
 
 	"hasher/pkg/hashing/jitter"
 	"hasher/pkg/hashing/math"
@@ -14,6 +15,55 @@ type ProofRecord struct {
 	Theorem   string `json:"theorem"`
 	ProofStep string `json:"proof_step"`
 	Domain    uint32 `json:"domain_id"`
+}
+
+// pipelineTrainingFrame mirrors pipeline/2_DATA_ENCODER/pkg/schema.TrainingFrame.
+// JSON tags are identical so the pipeline's Arrow writer can consume this file directly.
+type pipelineTrainingFrame struct {
+	SourceFile    string `json:"source_file"`
+	ChunkID       int32  `json:"chunk_id"`
+	WindowStart   int32  `json:"window_start"`
+	WindowEnd     int32  `json:"window_end"`
+	ContextLength int32  `json:"context_length"`
+	AsicSlots0    int32  `json:"asic_slot_0"`
+	AsicSlots1    int32  `json:"asic_slot_1"`
+	AsicSlots2    int32  `json:"asic_slot_2"`
+	AsicSlots3    int32  `json:"asic_slot_3"`
+	AsicSlots4    int32  `json:"asic_slot_4"`
+	AsicSlots5    int32  `json:"asic_slot_5"`
+	AsicSlots6    int32  `json:"asic_slot_6"`
+	AsicSlots7    int32  `json:"asic_slot_7"`
+	AsicSlots8    int32  `json:"asic_slot_8"`
+	AsicSlots9    int32  `json:"asic_slot_9"`
+	AsicSlots10   int32  `json:"asic_slot_10"`
+	AsicSlots11   int32  `json:"asic_slot_11"`
+	TargetTokenID int32  `json:"target_token_id"`
+	BestSeed      []byte `json:"best_seed,omitempty"`
+}
+
+func toPipelineFrame(f jitter.TrainingFrame) pipelineTrainingFrame {
+	s := f.AsicSlots
+	return pipelineTrainingFrame{
+		SourceFile:    f.SourceFile,
+		ChunkID:       f.ChunkID,
+		WindowStart:   f.WindowStart,
+		WindowEnd:     f.WindowEnd,
+		ContextLength: f.ContextLength,
+		AsicSlots0:    int32(s[0]),
+		AsicSlots1:    int32(s[1]),
+		AsicSlots2:    int32(s[2]),
+		AsicSlots3:    int32(s[3]),
+		AsicSlots4:    int32(s[4]),
+		AsicSlots5:    int32(s[5]),
+		AsicSlots6:    int32(s[6]),
+		AsicSlots7:    int32(s[7]),
+		AsicSlots8:    int32(s[8]),
+		AsicSlots9:    int32(s[9]),
+		AsicSlots10:   int32(s[10]),
+		AsicSlots11:   int32(s[11]),
+		TargetTokenID: f.TargetTokenID,
+		BestSeed:      f.BestSeed,
+	}
 }
 
 type MathMiner struct {
@@ -40,7 +90,6 @@ func (m *MathMiner) MineFromFile(inputPath string, outputPath string) (int, erro
 	}
 
 	frames := make([]jitter.TrainingFrame, 0, len(proofs))
-
 	for i, p := range proofs {
 		frame := m.processProof(p)
 		frame.ChunkID = int32(i)
@@ -57,22 +106,21 @@ func (m *MathMiner) MineFromFile(inputPath string, outputPath string) (int, erro
 func (m *MathMiner) processProof(p ProofRecord) jitter.TrainingFrame {
 	slots := m.mapper.MapLaTeXToTensor(p.ProofStep, p.Domain)
 
-	targetTokenID := deriveTargetTokenID(p.ProofStep)
-
-	frame := jitter.TrainingFrame{
+	return jitter.TrainingFrame{
 		AsicSlots:     slots,
 		SourceFile:    p.Theorem,
-		TargetTokenID: targetTokenID,
+		TargetTokenID: deriveTargetTokenID(p.ProofStep),
 		Metadata: map[string]interface{}{
 			"theorem":    p.Theorem,
 			"proof_step": p.ProofStep,
 			"domain":     math.GetSubDomainName(p.Domain),
 		},
 	}
-
-	return frame
 }
 
+// deriveTargetTokenID produces a stable non-zero token ID from the proof step text.
+// Uses FNV-32a for speed and distribution; result is capped at 100,000 to stay within
+// a realistic vocabulary range.
 func deriveTargetTokenID(proofStep string) int32 {
 	h := fnv.New32a()
 	h.Write([]byte(proofStep))
@@ -83,14 +131,37 @@ func deriveTargetTokenID(proofStep string) int32 {
 	return int32(hash % 100000)
 }
 
+// saveFrames writes two output files:
+//
+//	<outputPath>.json         — pretty-printed debug format (jitter.TrainingFrame)
+//	<outputPath>.pipeline.json — flat schema, JSON-tag-compatible with
+//	                             pipeline/2_DATA_ENCODER/pkg/schema.TrainingFrame.
+//	                             Feed this file to the 2_DATA_ENCODER pipeline stage
+//	                             to produce the Arrow IPC file consumed by 3_DATA_TRAINER.
 func (m *MathMiner) saveFrames(frames []jitter.TrainingFrame, outputPath string) error {
-	data, err := json.MarshalIndent(frames, "", "  ")
+	// Strip any existing .json suffix so we control both output file names cleanly.
+	base := strings.TrimSuffix(outputPath, ".json")
+
+	// 1. Pretty-printed debug JSON
+	debugData, err := json.MarshalIndent(frames, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal frames: %w", err)
+		return fmt.Errorf("failed to marshal debug frames: %w", err)
+	}
+	if err := os.WriteFile(base+".json", debugData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug JSON: %w", err)
 	}
 
-	if err := os.WriteFile(outputPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write output: %w", err)
+	// 2. Pipeline-compatible flat JSON (Arrow-ready)
+	flat := make([]pipelineTrainingFrame, len(frames))
+	for i, f := range frames {
+		flat[i] = toPipelineFrame(f)
+	}
+	pipelineData, err := json.Marshal(flat)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pipeline frames: %w", err)
+	}
+	if err := os.WriteFile(base+".pipeline.json", pipelineData, 0644); err != nil {
+		return fmt.Errorf("failed to write pipeline JSON: %w", err)
 	}
 
 	return nil
@@ -129,7 +200,5 @@ func ProcessMathDataset(config *MathDatasetConfig) (int, error) {
 	if err := config.ValidateConfig(); err != nil {
 		return 0, err
 	}
-
-	miner := NewMathMiner(config.Subdomain)
-	return miner.MineFromFile(config.InputPath, config.OutputPath)
+	return MineMathProofs(config.InputPath, config.OutputPath, config.Subdomain)
 }

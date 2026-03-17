@@ -2,12 +2,11 @@ package api
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 	"time"
-
-	"google.golang.org/grpc"
 
 	"hasher/pkg/hashing/math"
 	"hasher/pkg/hashing/miner"
@@ -25,6 +24,18 @@ func NewMathVerifierServer(subdomain uint32) *MathVerifierServer {
 	}
 	return &MathVerifierServer{
 		watchdog:  math.NewInferenceWatchdog(subdomain),
+		mapper:    math.NewLaTeXMapper(subdomain),
+		subdomain: subdomain,
+	}
+}
+
+// NewMathVerifierServerWithRules creates a server whose watchdog uses schema-loaded rules.
+func NewMathVerifierServerWithRules(subdomain uint32, rules []math.WatchdogRule) *MathVerifierServer {
+	if subdomain == 0 {
+		subdomain = math.SUBDOMAIN_ARITHMETIC
+	}
+	return &MathVerifierServer{
+		watchdog:  math.NewWatchdogWithRules(subdomain, rules),
 		mapper:    math.NewLaTeXMapper(subdomain),
 		subdomain: subdomain,
 	}
@@ -52,9 +63,7 @@ func (s *MathVerifierServer) Verify(latex string, subdomain uint32) *MathVerifyR
 
 	if validation.Valid {
 		response.Status = "VERIFIED"
-	}
-
-	if !validation.Valid && validation.Error != "" {
+	} else if validation.Error != "" {
 		response.Status = "REJECTED"
 		response.ResultHash = validation.Error
 	}
@@ -63,17 +72,18 @@ func (s *MathVerifierServer) Verify(latex string, subdomain uint32) *MathVerifyR
 }
 
 type MathVerifyResponse struct {
-	Status            string
-	Nonce             string
-	ResultHash        string
-	DetokenizedOutput string
-	LogicIntegrity    float32
-	LatencyMs         float32
+	Status            string  `json:"status"`
+	Nonce             string  `json:"nonce"`
+	ResultHash        string  `json:"result_hash"`
+	DetokenizedOutput string  `json:"detokenized_output"`
+	LogicIntegrity    float32 `json:"logic_integrity"`
+	LatencyMs         float32 `json:"latency_ms"`
 }
 
 type ServerConfig struct {
-	Port      string
-	Subdomain uint32
+	Port       string
+	Subdomain  uint32
+	SchemaPath string // optional: path to slot-schema YAML for rule loading
 }
 
 func DefaultServerConfig() *ServerConfig {
@@ -83,23 +93,60 @@ func DefaultServerConfig() *ServerConfig {
 	}
 }
 
+// StartServer starts the HashNet Math Verification REST API on config.Port.
+// Endpoints:
+//
+//	POST /v1/verify/math  — verify a LaTeX derivation step
+//	GET  /health          — liveness probe
 func StartServer(config *ServerConfig) error {
 	if config == nil {
 		config = DefaultServerConfig()
 	}
 
-	lis, err := net.Listen("tcp", config.Port)
-	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
+	var server *MathVerifierServer
+
+	if config.SchemaPath != "" {
+		rules, err := math.LoadWatchdogRulesFromYAML(config.SchemaPath)
+		if err != nil {
+			log.Printf("Warning: could not load schema rules from %s: %v — using hard-coded fallback", config.SchemaPath, err)
+			server = NewMathVerifierServer(config.Subdomain)
+		} else {
+			log.Printf("Loaded %d validation rules from %s", len(rules), config.SchemaPath)
+			server = NewMathVerifierServerWithRules(config.Subdomain, rules)
+		}
+	} else {
+		server = NewMathVerifierServer(config.Subdomain)
 	}
 
-	grpcServer := grpc.NewServer()
-	server := NewMathVerifierServer(config.Subdomain)
-	RegisterMathVerifierService(grpcServer, server)
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/verify/math", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req MathVerificationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp := server.Verify(req.Proposition, req.Subdomain)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
+	})
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+			"domain": "MATHASHER",
+		})
+	})
 
 	log.Printf("HashNet Math Verification API listening on %s", config.Port)
-
-	return grpcServer.Serve(lis)
+	return http.ListenAndServe(config.Port, mux)
 }
 
 type MathVerificationRequest struct {
@@ -136,14 +183,11 @@ func VerifyMathDerivation(req MathVerificationRequest) (MathVerificationResponse
 		ResultHash:        fmt.Sprintf("0x%08x", slots[3]),
 		DetokenizedOutput: req.Proposition,
 		LogicIntegrity:    validation.LogicIntegrity,
-		LatencyMs:         0,
 	}
 
 	if validation.Valid {
 		response.Status = "VERIFIED"
-	}
-
-	if !validation.Valid {
+	} else {
 		response.Status = "REJECTED"
 		response.ResultHash = validation.Error
 	}
@@ -184,12 +228,4 @@ func HashFrameBytes(latex string, subdomain uint32) []byte {
 		binary.BigEndian.PutUint32(result[i*4:], v)
 	}
 	return result
-}
-
-type MathVerifierService interface {
-	Verify(latex string, subdomain uint32) *MathVerifyResponse
-}
-
-func RegisterMathVerifierService(grpcServer *grpc.Server, service MathVerifierService) {
-	log.Println("Math Verifier Service registered (gRPC handler)")
 }
