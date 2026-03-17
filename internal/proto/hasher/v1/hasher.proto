@@ -23,6 +23,9 @@ service hasherService {
 
   // MineWork performs mining on a Bitcoin-style header to find a valid nonce
   rpc MineWork(MineWorkRequest) returns (MineWorkResponse);
+
+  // VerifyMath verifies a mathematical derivation step
+  rpc VerifyMath(VerifyMathRequest) returns (VerifyMathResponse);
 }
 
 // ComputeHashRequest contains data for single hash computation
@@ -157,4 +160,40 @@ message MineWorkResponse {
   
   // Operation latency in microseconds
   uint64 latency_us = 2;
+}
+
+// VerifyMathRequest for math derivation verification
+message VerifyMathRequest {
+  // Context description of the derivation
+  string context = 1;
+  
+  // The proposed mathematical step (LaTeX)
+  string proposition = 2;
+  
+  // Math subdomain (e.g., 0x2200 for Calculus)
+  uint32 subdomain = 3;
+  
+  // Confidence threshold (0.0-1.0)
+  float confidence_threshold = 4;
+}
+
+// VerifyMathResponse for math verification result
+message VerifyMathResponse {
+  // Verification status
+  string status = 1;
+  
+  // Golden nonce if verified
+  string nonce = 2;
+  
+  // Result hash
+  string result_hash = 3;
+  
+  // Detokenized output
+  string detokenized_output = 4;
+  
+  // Logic integrity score (0.0-1.0)
+  float logic_integrity = 5;
+  
+  // Latency in milliseconds
+  float latency_ms = 6;
 }

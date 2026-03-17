@@ -597,6 +597,106 @@ The `hasher` package integrates with existing asic-driver architecture:
 - **Dependencies**: Go 1.16+, standard library only (no external frameworks)
 - **Network**: Supports automatic discovery of hasher-server instances
 
+## MATHASHER: Deterministic Mathematical Verification
+
+HASHER now includes the **MATHASHER** extension - a deterministic mathematical verification layer that addresses the "Broken arXiv" problem of LLM hallucination in long-form derivations.
+
+### Key Features
+
+#### 1. Math-Domain Bitmask Specification
+The system uses specialized bitmasks for Slot 4 (Grammar) and Slot 10 (Domain) when operating in Math Mode:
+
+| Slot 4 (Math POS) | Role | Description |
+|:---:|:---:|:---|
+| `0x01` | VARIABLE | Symbolic placeholders (x, y, θ, α) |
+| `0x02` | OPERATOR | Arithmetic or logical actions (+, -, ∫, Σ) |
+| `0x03` | INTEGER | Constant whole numbers (1, 2, 42) |
+| `0x04` | DECIMAL | Floating-point values (3.14, 0.5) |
+| `0x05` | FUNCTION | Named operations (sin, log, lim) |
+| `0x06` | DELIMITER | Structural boundaries ( (, ), [ ] ) |
+| `0x07` | RELATION | Comparative logic (=, <, ≈, ≡) |
+| `0x08` | EXPONENT | Power indicators (^2, √) |
+
+| Slot 10 (Domain) | Sub-Domain |
+|:---:|:---|
+| `0x2000` | Arithmetic |
+| `0x2100` | Algebra |
+| `0x2200` | Calculus |
+| `0x2300` | Statistics |
+| `0x2400` | Logic/Set |
+
+#### 2. LaTeX-to-Tensor Mapper
+Converts mathematical expressions into the 12-slot neural frame:
+
+```go
+mapper := math.NewLaTeXMapper(math.SUB_calculus)
+slots := mapper.MapLaTeXToTensor("\\int_0^1 x^2 dx", math.SUB_calculus)
+// Returns [12]uint32 with domain locked to 0x2200
+```
+
+#### 3. Inference Watchdog
+Validates mathematical derivation steps against bitmask constraints:
+
+```go
+watchdog := math.NewInferenceWatchdog(math.SUB_algebra)
+result := watchdog.ValidateMathStep(0, slots)
+// Returns ValidationResult with LogicIntegrity score
+```
+
+#### 4. HashNet Plugin API
+REST endpoint for mathematical verification:
+
+```json
+POST /v1/verify/math
+{
+  "context": "Integrating f(x) = x^2 from 0 to 3",
+  "proposition": "\\int_0^3 x^2 dx = 9",
+  "subdomain": "0x2200"
+}
+```
+
+Response:
+```json
+{
+  "status": "VERIFIED",
+  "nonce": "0xABC12345",
+  "logic_integrity": 0.99,
+  "latency_ms": 2.4
+}
+```
+
+#### 5. Math-Logic Dataset Miner
+Ingest mathematical proofs from Lean, OpenWebMath, or arXiv:
+
+```go
+mined, err := api.MineMathDataset("input.json", "output.parquet", math.SUB_calculus)
+```
+
+### Usage
+
+```bash
+# Verify a mathematical expression
+go run cmd/cli/main.go math-verify "x + y = z" --subdomain algebra
+
+# Run tests
+go test -v ./pkg/hashing/math/...
+
+# Build with math-logic support
+make cli MATH=true
+```
+
+### Why MATHASHER?
+
+Traditional LLMs treat math as "likely sequence of characters" - they drift into probabilistic guessing. MATHASHER treats math as a cryptographically signed path where every "=" requires a verified Golden Nonce.
+
+| Feature | Standard LLM | MATHASHER |
+|:---:|:---:|:---:|
+| Math Execution | Probabilistic | **Cryptographic** |
+| Logic Guardrails | Self-correction fails | **Hard-coded Bitmasks** |
+| Verification | Black box | **Golden Nonce Proof** |
+
+---
+
 ## Future Enhancements
 
 1. **Z3 Integration**: Full integration with Z3 theorem prover for advanced logical reasoning

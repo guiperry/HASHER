@@ -1,0 +1,65 @@
+# MATHASHER Slot Schema - Math Domain
+# Controls the meaning of Slot 4 (Grammar/Role) and Slot 10 (Domain Signature)
+
+domain:
+  name: "MATHASHER"
+  slot10_base: 0x2000  # Math domain base signature
+
+subdomains:
+  - id: 0x00
+    name: "Arithmetic"
+    slot10: 0x2000
+  - id: 0x01
+    name: "Algebra"
+    slot10: 0x2100
+  - id: 0x02
+    name: "Calculus"
+    slot10: 0x2200
+  - id: 0x03
+    name: "Statistics"
+    slot10: 0x2300
+  - id: 0x04
+    name: "Logic/Set"
+    slot10: 0x2400
+
+slot4_roles:
+  - id: 0x01
+    name: "VARIABLE"
+    description: "Symbolic placeholders"
+    patterns: ["^[a-z]$", "alpha", "beta", "gamma", "theta", "lambda", "mu", "sigma", "omega"]
+  - id: 0x02
+    name: "OPERATOR"
+    description: "Arithmetic or logical actions"
+    patterns: ["\\+", "-", "\\times", "\\div", "\\cdot", "\\int", "\\sum", "\\prod", "\\partial", "\\nabla"]
+  - id: 0x03
+    name: "INTEGER"
+    description: "Constant whole numbers"
+    patterns: ["^\\d+$"]
+  - id: 0x04
+    name: "DECIMAL"
+    description: "Floating-point or fractional values"
+    patterns: ["^\\d+\\.\\d+$"]
+  - id: 0x05
+    name: "FUNCTION"
+    description: "Named mathematical operations"
+    patterns: ["\\\\sin", "\\\\cos", "\\\\tan", "\\\\log", "\\\\ln", "\\\\exp", "\\\\lim", "\\\\sqrt"]
+  - id: 0x06
+    name: "DELIMITER"
+    description: "Structural boundaries"
+    patterns: ["\\(", "\\)", "\\[", "\\]", "\\{", "\\}"]
+  - id: 0x07
+    name: "RELATION"
+    description: "Comparative logic"
+    patterns: ["=", "<", ">", "\\\\leq", "\\\\geq", "\\\\approx", "\\\\equiv", "\\\\neq"]
+  - id: 0x08
+    name: "EXPONENT"
+    description: "Power or root indicators"
+    patterns: ["\\^", "\\\\sqrt\\{"]
+
+validation_rules:
+  - name: "operator_cannot_follow_operator"
+    prev_role: 0x02
+    forbidden_next: [0x02, 0x07]
+  - name: "relation_cannot_follow_operator"
+    prev_role: 0x07
+    forbidden_next: [0x02, 0x05]

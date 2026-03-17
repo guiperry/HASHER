@@ -1,0 +1,55 @@
+# General HASHER Slot Schema - Prose Domain
+
+domain:
+  name: "HASHER"
+  slot10_base: 0x1000
+
+subdomains:
+  - id: 0x00
+    name: "Prose"
+    slot10: 0x1000
+  - id: 0x01
+    name: "Academic"
+    slot10: 0x1100
+  - id: 0x02
+    name: "Technical"
+    slot10: 0x1200
+  - id: 0x03
+    name: "Creative"
+    slot10: 0x1300
+
+# Slot 4 uses spaCy POS tags (loaded from packer.go)
+slot4_source: "spacy_pos"
+
+# POS tag mappings for Slot 4
+pos_mappings:
+  - id: 0x01
+    name: "NOUN"
+    spaCy_tags: ["NN", "NNS", "NNP", "NNPS"]
+  - id: 0x02
+    name: "VERB"
+    spaCy_tags: ["VB", "VBD", "VBG", "VBN", "VBP", "VBZ"]
+  - id: 0x03
+    name: "ADJ"
+    spaCy_tags: ["JJ", "JJR", "JJS"]
+  - id: 0x04
+    name: "ADV"
+    spaCy_tags: ["RB", "RBR", "RBS"]
+  - id: 0x05
+    name: "PRON"
+    spaCy_tags: ["PRP", "PRP$", "WP", "WP$"]
+  - id: 0x06
+    name: "DET"
+    spaCy_tags: ["DT", "PDT", "WDT"]
+  - id: 0x07
+    name: "PREP"
+    spaCy_tags: ["IN"]
+  - id: 0x08
+    name: "CONJ"
+    spaCy_tags: ["CC"]
+  - id: 0x09
+    name: "NUM"
+    spaCy_tags: ["CD"]
+  - id: 0x0A
+    name: "PUNCT"
+    spaCy_tags: [".", ",", ":", ";", "!", "?"]

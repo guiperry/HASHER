@@ -119,6 +119,7 @@ const (
 	LogView
 	PipelineView
 	PipelineSelectView
+	DataVerificationModeView
 )
 
 // Styles
@@ -235,20 +236,25 @@ var primaryMenuItems = []list.Item{
 	menuItem{
 		title:       "1. Data Pipeline",
 		description: "Run the data processing pipeline (miner → encoder → trainer)",
-		view:        PipelineView,
+		view:        PipelineSelectView,
 	},
 	menuItem{
-		title:       "2. ASIC Config",
+		title:       "2. Data Verification Mode",
+		description: "Run data verification with Semantic or Mathematical mode",
+		view:        PipelineSelectView,
+	},
+	menuItem{
+		title:       "3. ASIC Config",
 		description: "Configure ASIC devices (Discovery, Probe, Protocol, Provision, Troubleshoot)",
 		view:        AsicConfigView,
 	},
 	menuItem{
-		title:       "3. Start Driver",
+		title:       "4. Start Driver",
 		description: "Start the hasher-host orchestrator and show initialization logs",
 		view:        PrimaryMenuView,
 	},
 	menuItem{
-		title:       "4. Test Chat",
+		title:       "5. Test Chat",
 		description: "Test hasher validation service via chat interface",
 		view:        ChatView,
 	},
@@ -274,6 +280,20 @@ var pipelineTypeMenuItems = []list.Item{
 	menuItem{
 		title:       "3. Demo (Hello World)",
 		description: "Generate hello world demo frames — fastest way to test the pipeline",
+		view:        PipelineView,
+	},
+}
+
+// Data Verification mode menu items (Semantic vs Mathematical)
+var dataVerificationModeMenuItems = []list.Item{
+	menuItem{
+		title:       "1. Semantic Mode",
+		description: "Run data verification with semantic embeddings (BGE-base, variance-based mapping)",
+		view:        PipelineView,
+	},
+	menuItem{
+		title:       "2. Mathematical Mode",
+		description: "Run data verification for mathematical derivations (MATHASHER, LaTeX parsing)",
 		view:        PipelineView,
 	},
 }
@@ -337,29 +357,29 @@ type PipelineStage struct {
 
 // Model represents the application state
 type Model struct {
-	CurrentView    int
-	PrimaryMenu    list.Model
-	AsicConfigMenu list.Model
-	ChatView       textarea.Model
-	LogView        textarea.Model
-	InitView       viewport.Model // Initialization logs view (using viewport for scrolling)
-	Input          textarea.Model
-	ServerCmd      *exec.Cmd
-	ServerLogs     []string
-	ChatHistory    []string
-	ServerReady      bool
-	ServerStarting   bool // true when hasher-host process is running but not ready yet
-	ShowingInitLogs  bool // true when the init log panel is visible (Esc hides it)
-	ResourceData   string
-	Width          int
-	Height         int
-	ProgressText   string
-	ProgressStatus string
-	Deployer       *analyzer.Deployer
-	DeviceIP       string            // Connected ASIC device IP (empty if none)
-	DeviceType     string            // Type of connected device
-	CryptoEnabled  bool              // Whether crypto-transformer is enabled
-	APIClient      *client.APIClient // API client for hasher-host
+	CurrentView     int
+	PrimaryMenu     list.Model
+	AsicConfigMenu  list.Model
+	ChatView        textarea.Model
+	LogView         textarea.Model
+	InitView        viewport.Model // Initialization logs view (using viewport for scrolling)
+	Input           textarea.Model
+	ServerCmd       *exec.Cmd
+	ServerLogs      []string
+	ChatHistory     []string
+	ServerReady     bool
+	ServerStarting  bool // true when hasher-host process is running but not ready yet
+	ShowingInitLogs bool // true when the init log panel is visible (Esc hides it)
+	ResourceData    string
+	Width           int
+	Height          int
+	ProgressText    string
+	ProgressStatus  string
+	Deployer        *analyzer.Deployer
+	DeviceIP        string            // Connected ASIC device IP (empty if none)
+	DeviceType      string            // Type of connected device
+	CryptoEnabled   bool              // Whether crypto-transformer is enabled
+	APIClient       *client.APIClient // API client for hasher-host
 
 	// Text selection fields
 	SelectedText    string // Currently selected text
@@ -381,6 +401,10 @@ type Model struct {
 	PipelineStages   []PipelineStage
 	PipelineType     string     // Selected pipeline type: "goat", "arxiv", "demo"
 	PipelineTypeMenu list.Model // Type selection sub-menu
+
+	// Data Verification state
+	DataVerificationMode     string     // Selected verification mode: "semantic", "mathematical"
+	DataVerificationModeMenu list.Model // Mode selection sub-menu
 
 	// Log channel for hasher-host output
 	LogChan chan string
@@ -497,6 +521,15 @@ func NewModel() Model {
 		PipelineTypeMenu: func() list.Model {
 			l := list.New(pipelineTypeMenuItems, list.NewDefaultDelegate(), defaultWidth-4, 8)
 			l.Title = "Select Pipeline Type"
+			l.SetShowStatusBar(false)
+			l.SetFilteringEnabled(false)
+			return l
+		}(),
+		// Data Mining/Verification state
+		DataVerificationMode: "semantic",
+		DataVerificationModeMenu: func() list.Model {
+			l := list.New(dataVerificationModeMenuItems, list.NewDefaultDelegate(), defaultWidth-4, 8)
+			l.Title = "Select Data Verification Mode"
 			l.SetShowStatusBar(false)
 			l.SetFilteringEnabled(false)
 			return l
@@ -826,15 +859,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "1. Data Pipeline":
 						// Show pipeline type selection sub-menu before starting
 						m.CurrentView = PipelineSelectView
-					case "2. ASIC Config":
+					case "2. Data Verification Mode":
+						// Show data verification mode selection (Semantic vs Mathematical)
+						m.CurrentView = DataVerificationModeView
+					case "3. ASIC Config":
 						m.CurrentView = AsicConfigView
-					case "3. Start Driver":
+					case "4. Start Driver":
 						m.ServerStarting = true
 						m.ShowingInitLogs = true
 						m.ServerLogs = append(m.ServerLogs, "Initializing...")
 						GetLogger().Write("Initializing...\n")
 						cmds = append(cmds, m.startHasherHost())
-					case "4. Test Chat":
+					case "5. Test Chat":
 						m.CurrentView = ChatView
 					case "0. Quit":
 						return m, tea.Quit
@@ -1063,6 +1099,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.PipelineTypeMenu, cmd = m.PipelineTypeMenu.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+
+	case DataVerificationModeView:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.CurrentView = PrimaryMenuView
+			case tea.KeyEnter:
+				if i, ok := m.DataVerificationModeMenu.SelectedItem().(menuItem); ok {
+					m.DataVerificationMode = dataVerificationModeFromTitle(i.title)
+					m.CurrentView = PipelineView
+					m.PipelineRunning = true
+					m.PipelineStage = "initializing"
+					m.PipelineProgress = 0
+					m.PipelineLogs = []string{
+						fmt.Sprintf("[%s] Data Verification mode selected: %s", time.Now().Format("15:04:05"), m.DataVerificationMode),
+					}
+					// Run the math-verifier in mathematical mode, or the data pipeline in semantic mode
+					if m.DataVerificationMode == "mathematical" {
+						pipelineCmd := m.runMathVerifier()
+						cmds = append(cmds, pipelineCmd)
+					} else {
+						pipelineCmd := m.runDataPipeline()
+						cmds = append(cmds, pipelineCmd)
+					}
+					cmds = append(cmds, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+						return pollPipelineLogsMsg{}
+					}))
+				}
+			default:
+				m.DataVerificationModeMenu, cmd = m.DataVerificationModeMenu.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		default:
+			m.DataVerificationModeMenu, cmd = m.DataVerificationModeMenu.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -1083,6 +1156,8 @@ func (m Model) View() string {
 		return m.renderPipelineView()
 	case PipelineSelectView:
 		return m.renderPipelineSelectView()
+	case DataVerificationModeView:
+		return m.renderDataVerificationModeView()
 	}
 
 	return m.renderPrimaryMenu()
@@ -1383,6 +1458,18 @@ func pipelineTypeFromTitle(title string) string {
 	}
 }
 
+// dataVerificationModeFromTitle maps a menu item title to a data verification mode key.
+func dataVerificationModeFromTitle(title string) string {
+	switch title {
+	case "1. Semantic Mode":
+		return "semantic"
+	case "2. Mathematical Mode":
+		return "mathematical"
+	default:
+		return "semantic"
+	}
+}
+
 // buildPipelineStages returns the pipeline stages for the given type.
 func buildPipelineStages(pipelineType string) []PipelineStage {
 	trainerStage := PipelineStage{
@@ -1428,6 +1515,20 @@ func (m Model) renderPipelineSelectView() string {
 		Width(m.Width - 4).
 		Height(m.Height - 6).
 		Render(m.PipelineTypeMenu.View())
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+}
+
+// renderDataVerificationModeView renders the data verification mode selection sub-menu.
+func (m Model) renderDataVerificationModeView() string {
+	header := headerStyle.Copy().Width(m.Width).Render(" Hasher CLI - Data Verification Mode")
+	footer := footerStyle.Copy().Width(m.Width).Render("↑/↓ Navigate  Enter Select  Esc Back")
+
+	content := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.Width - 4).
+		Height(m.Height - 6).
+		Render(m.DataVerificationModeMenu.View())
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 }
@@ -1657,13 +1758,13 @@ func (m *Model) updateChatView() {
 		content += wrappedMsg + "\n\n"
 	}
 	m.ChatView.SetValue(content)
-	
+
 	// Scroll to bottom by moving cursor down for each line
 	lines := strings.Split(content, "\n")
 	for i := 0; i < len(lines); i++ {
 		m.ChatView.CursorDown()
 	}
-	
+
 	m.ChatContent = content
 }
 
@@ -1677,13 +1778,13 @@ func (m *Model) updateLogView() {
 		content += wrappedLog + "\n"
 	}
 	m.LogView.SetValue(content)
-	
+
 	// Scroll to bottom by moving cursor down for each line
 	lines := strings.Split(content, "\n")
 	for i := 0; i < len(lines); i++ {
 		m.LogView.CursorDown()
 	}
-	
+
 	m.LogContent = content
 
 	// Also update init view if we're in initialization mode
@@ -2484,6 +2585,48 @@ func (m Model) runDataPipeline() tea.Cmd {
 			Progress:   0,
 			Log:        fmt.Sprintf("[%s] ▶️ Starting data pipeline...", time.Now().Format("15:04:05")),
 			StageIndex: -1, // Will trigger stageIndex 0 in Update
+		}
+	}
+}
+
+func (m Model) runMathVerifier() tea.Cmd {
+	return func() tea.Msg {
+		binDir, err := embedded.GetBinDir()
+		if err != nil {
+			return PipelineCompleteMsg{
+				Success: false,
+				Message: fmt.Sprintf("Failed to get binary directory: %v", err),
+			}
+		}
+
+		binaryPath := filepath.Join(binDir, "math-verifier")
+
+		// Check if binary exists
+		if _, err := os.Stat(binaryPath); err != nil {
+			// Try to extract from embedded
+			binaryPath, err = embedded.GetBinaryPath("math-verifier")
+			if err != nil {
+				return PipelineCompleteMsg{
+					Success: false,
+					Message: fmt.Sprintf("math-verifier binary not found: %v", err),
+				}
+			}
+		}
+
+		mode := m.DataVerificationMode
+		if mode == "mathematical" {
+			return PipelineProgressMsg{
+				Stage:      "math-verifier",
+				Progress:   0,
+				Log:        fmt.Sprintf("[%s] ▶️ Starting MATHASHER math verification server...", time.Now().Format("15:04:05")),
+				StageIndex: 0,
+			}
+		}
+
+		// Semantic mode falls back to regular pipeline
+		return PipelineCompleteMsg{
+			Success: true,
+			Message: fmt.Sprintf("Data verification mode '%s' started", mode),
 		}
 	}
 }
