@@ -32,8 +32,10 @@ import (
 	"hasher/internal/discovery"
 	devicepkg "hasher/internal/driver/device"
 	"hasher/internal/host"
+	hasherapi "hasher/pkg/hashing/api"
 	"hasher/pkg/hashing/inference"
 	jitterpkg "hasher/pkg/hashing/jitter"
+	hashermath "hasher/pkg/hashing/math"
 	"hasher/pkg/hashing/methods/asic"
 	"hasher/pkg/hashing/neural"
 	"hasher/pkg/hashing/tokenizer"
@@ -124,6 +126,11 @@ var (
 	cgminerHost    = flag.String("cgminer-host", "", "CGMiner API host (e.g. 192.168.12.151). If set, the ASIC mines the final golden nonce for each inference token")
 	cgminerPort    = flag.Int("cgminer-port", 4028, "CGMiner API port (default 4028)")
 	cgminerTimeout = flag.Duration("cgminer-timeout", 10*time.Second, "timeout per CGMiner mining request")
+
+	// Schema-driven domain selection: makes hasher-host behave as HASHER or MATHASHER
+	// at runtime depending on which schema YAML is loaded.
+	schemaPath = flag.String("schema", "", "Path to slot-schema YAML (e.g. pipeline/2_DATA_ENCODER/config/math_schema.yaml). When domain is MATHASHER, mounts POST /v1/verify/math on the API server.")
+	subdomain  = flag.Uint("subdomain", 0, "Math subdomain override when --schema names MATHASHER: 0=Arithmetic 1=Algebra 2=Calculus 3=Statistics 4=Logic")
 )
 
 // Orchestrator manages the recursive inference process
@@ -139,6 +146,11 @@ type Orchestrator struct {
 	startTime       time.Time
 	mu              sync.RWMutex
 	deployer        *host.Deployer // For auto-deployment
+
+	// Domain-specific plugin: non-nil when --schema names a MATHASHER schema.
+	// Routes POST /v1/verify/math and GET /v1/verify/math/health are mounted
+	// on the gin router only when this is set.
+	mathServer *hasherapi.MathVerifierServer
 
 	// Connection monitoring
 	connectionHealthy bool          // Current connection health status
@@ -610,6 +622,34 @@ func main() {
 		serverDeviceIPAddr: extractIPFromAddress(serverDeviceAddr),
 	}
 
+	// Load schema and activate domain-specific plugin if --schema is provided.
+	// The same binary becomes a General HASHER or a MATHASHER at runtime:
+	//   ./hasher-host --schema pipeline/2_DATA_ENCODER/config/prose_schema.yaml  → HASHER
+	//   ./hasher-host --schema pipeline/2_DATA_ENCODER/config/math_schema.yaml   → MATHASHER
+	if *schemaPath != "" {
+		if _, statErr := os.Stat(*schemaPath); statErr != nil {
+			log.Fatalf("Schema file not found: %s", *schemaPath)
+		}
+		domain, domErr := hashermath.LoadDomainFromSchema(*schemaPath)
+		if domErr != nil {
+			log.Fatalf("Failed to read schema domain from %s: %v", *schemaPath, domErr)
+		}
+		log.Printf("Schema loaded: domain=%s file=%s", domain, *schemaPath)
+
+		if domain == "MATHASHER" {
+			subdomainVal := uint32(*subdomain)
+			rules, rulesErr := hashermath.LoadWatchdogRulesFromYAML(*schemaPath)
+			if rulesErr != nil {
+				log.Printf("Warning: could not load watchdog rules from schema: %v — using hard-coded fallback", rulesErr)
+				orch.mathServer = hasherapi.NewMathVerifierServer(subdomainVal)
+			} else {
+				log.Printf("MATHASHER mode: loaded %d validation rules", len(rules))
+				orch.mathServer = hasherapi.NewMathVerifierServerWithRules(subdomainVal, rules)
+			}
+			log.Printf("MATHASHER routes will be available at POST /v1/verify/math and GET /v1/verify/math/health")
+		}
+	}
+
 	// Start connection monitor for ASIC connection health
 	if asicClient != nil && !asicClient.IsUsingFallback() {
 		go orch.runConnectionMonitor()
@@ -1032,6 +1072,14 @@ func runAPIServer(orch *Orchestrator) {
 
 		// Shutdown endpoint
 		api.POST("/shutdown", orch.handleShutdown)
+	}
+
+	// Domain-specific plugin routes — only mounted when a MATHASHER schema is loaded.
+	if orch.mathServer != nil {
+		v1 := router.Group("/v1")
+		v1.POST("/verify/math", gin.WrapF(orch.mathServer.VerifyHandler()))
+		v1.GET("/verify/math/health", gin.WrapF(orch.mathServer.MathHealthHandler()))
+		log.Printf("MATHASHER routes mounted: POST /v1/verify/math  |  GET /v1/verify/math/health")
 	}
 
 	// Set up graceful shutdown

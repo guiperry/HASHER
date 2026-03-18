@@ -48,11 +48,9 @@ func (m *LaTeXMapper) MapLaTeXToTensor(latexExpr string, subdomain uint32) [12]u
 		slots[4] = lastToken.Role
 	}
 
-	for i := 0; i < 4; i++ {
-		slots[i] = hashContext(latexExpr, i)
-	}
+	slots[0], slots[1], slots[2], slots[3] = GetSemanticAnchors(latexExpr)
 
-	slots[11] = generateTemporalLock(latexExpr)
+	slots[11] = GenerateTemporalLock(latexExpr)
 
 	return slots
 }
@@ -182,27 +180,29 @@ func domainFromSubdomain(subdomain uint32) uint32 {
 	return SubDomainToSlot10(subdomain)
 }
 
-func hashContext(latex string, slot int) uint32 {
-	h := uint32(len(latex))
-	for i, c := range latex {
-		rot := (uint32(c) << ((i + slot*3) % 24))
+// HashContext returns a deterministic polynomial hash of s for the given slot
+// index. Used to fill Slots 0–3 (semantic anchors) until BGE-Base embeddings
+// are wired in.
+func HashContext(s string, slot int) uint32 {
+	h := uint32(len(s))
+	for i, c := range s {
+		rot := uint32(c) << ((i + slot*3) % 24)
 		h = h*31 + rot
 	}
 	return h
 }
 
-func generateTemporalLock(latex string) uint32 {
+// GenerateTemporalLock returns a deterministic temporal lock value for s.
+// Used to populate Slot 11.
+func GenerateTemporalLock(s string) uint32 {
 	h := uint32(0)
-	for i, c := range latex {
+	for i, c := range s {
 		h += uint32(c) * uint32(i+1)
 	}
 	return h ^ 0xCAFEBABE
 }
 
+// GetSemanticAnchors returns the four slot-0..3 hash values for latex.
 func GetSemanticAnchors(latex string) (a, b, c, d uint32) {
-	a = hashContext(latex, 0)
-	b = hashContext(latex, 1)
-	c = hashContext(latex, 2)
-	d = hashContext(latex, 3)
-	return
+	return HashContext(latex, 0), HashContext(latex, 1), HashContext(latex, 2), HashContext(latex, 3)
 }

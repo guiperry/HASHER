@@ -149,6 +149,39 @@ func StartServer(config *ServerConfig) error {
 	return http.ListenAndServe(config.Port, mux)
 }
 
+// VerifyHandler returns an http.HandlerFunc for POST /v1/verify/math.
+// Mount on a gin router with gin.WrapF(server.VerifyHandler()).
+func (s *MathVerifierServer) VerifyHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req MathVerificationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp := s.Verify(req.Proposition, req.Subdomain)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("Error encoding verify response: %v", err)
+		}
+	}
+}
+
+// MathHealthHandler returns an http.HandlerFunc for GET /v1/verify/math/health.
+// Mount on a gin router with gin.WrapF(server.MathHealthHandler()).
+func (s *MathVerifierServer) MathHealthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+			"domain": "MATHASHER",
+		})
+	}
+}
+
 type MathVerificationRequest struct {
 	Context             string  `json:"context"`
 	Proposition         string  `json:"proposition"`

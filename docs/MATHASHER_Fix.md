@@ -88,24 +88,14 @@ type Mapper interface {
 
 ---
 
-#### ARC-2 — Migrate `LaTeXMapper` to pipeline ⚠️ DUPLICATE EXISTS, MIGRATION INCOMPLETE
-**Files:** `pipeline/2_DATA_ENCODER/pkg/mapper/schema_latex_mapper.go` (new), `pkg/hashing/math/latex_mapper.go` (old — still present)
+#### ARC-2 — Single source of truth for LaTeX tokenization ✅ DONE
+**Files:** `pipeline/2_DATA_ENCODER/pkg/mapper/schema_latex_mapper.go`, `pkg/hashing/math/latex_mapper.go`
 
-`SchemaLaTeXMapper` was created in the pipeline and correctly implements the `Mapper` interface. However, the original `pkg/hashing/math/latex_mapper.go` was **not removed**. Two mapper implementations now coexist:
+`pkg/hashing/math/latex_mapper.go` is the canonical implementation. `HashContext`, `GenerateTemporalLock`, `GetSemanticAnchors`, and `TokenizeLaTeX` are all exported and called from the pipeline mapper.
 
-| Location | Type | Schema-driven? | Used by |
-|---|---|---|---|
-| `pkg/hashing/math/latex_mapper.go` | `LaTeXMapper` | No | `miner`, `api`, `watchdog helpers` |
-| `pipeline/2_DATA_ENCODER/pkg/mapper/schema_latex_mapper.go` | `SchemaLaTeXMapper` | Yes | Nothing in production yet |
+`pipeline/2_DATA_ENCODER/go.mod` now lists `hasher v0.0.0` with `replace hasher => ../..` so the pipeline imports the runtime package directly without duplication. The previous duplicate `hashContext`, `generateTemporalLock`, `tokenize`, and `splitPlain` functions have been removed from `schema_latex_mapper.go`.
 
-The miner and API still import and use `math.LaTeXMapper`. The new schema-driven mapper is dead code from a runtime perspective.
-
-**Additionally:** `SchemaVarianceMapper.Map()` is a stub — it sets only Slot 10 and returns. It does not call the existing `VarianceMapper.MapToSlots()` logic from `variance_mapper.go`. The general-prose path is not wired through the new interface at all.
-
-**Remaining work:**
-1. Update `pkg/hashing/miner/math_miner.go` to use `SchemaLaTeXMapper` via the pipeline package (or accept a `Mapper` interface).
-2. Wire `VarianceMapper.MapToSlots()` into `SchemaVarianceMapper.Map()`.
-3. Remove or deprecate `pkg/hashing/math/latex_mapper.go` once all callers are migrated.
+`SchemaLaTeXMapper.Map()` now calls `m.latexMapper.TokenizeLaTeX(input)` for splitting and then re-classifies the last token using schema-compiled patterns (`detectRole`). Tokenization logic and role-detection logic are properly separated.
 
 ---
 
@@ -170,10 +160,14 @@ Note: Direct Arrow IPC output from the miner was not added (requires importing t
 
 ---
 
-#### PRD-1 — Standalone server entry point ✅ FULLY IMPLEMENTED
-**File:** `cmd/driver/math-verifier/main.go`
+#### PRD-1 — Domain entry point merged into hasher-host ✅ FULLY IMPLEMENTED
+**File:** `cmd/driver/hasher-host/main.go` (the standalone `cmd/driver/math-verifier/` has been deleted)
 
-The binary has `--port`, `--subdomain`, and now `--schema` flags. When `--schema` is provided it validates the file exists and passes `config.SchemaPath` to `StartServer`, which loads `WatchdogRule` from the YAML. Startup logging shows whether schema-based or fallback validation is active, and lists the REST endpoints. Graceful shutdown via `SIGINT`/`SIGTERM` is in place.
+`hasher-host` now accepts `--schema <path>` and `--subdomain <n>`. At startup it reads `domain.name` from the YAML via `math.LoadDomainFromSchema`. When the domain is `MATHASHER`, a `MathVerifierServer` is constructed (with schema-loaded watchdog rules) and its handlers are mounted on the same gin router via `gin.WrapF`:
+- `POST /v1/verify/math`
+- `GET /v1/verify/math/health`
+
+Running without `--schema` (or with a prose schema) leaves the math routes unmounted — the binary behaves as a pure General HASHER. Graceful shutdown is already handled by the existing signal loop.
 
 ---
 
@@ -259,7 +253,7 @@ The binary calls `math.GetSubDomainName(subdomainVal)` for the startup log line.
 | ID | Description | Status |
 |---|---|---|
 | ARC-1 | `Mapper` interface | ✅ IMPLEMENTED |
-| ARC-2 | Migrate `LaTeXMapper` to pipeline | ⚠️ Pipeline mapper complete; legacy `math.LaTeXMapper` not yet removed (miner/API still use it) |
+| ARC-2 | Single source of truth for tokenization | ✅ Pipeline imports `hasher/pkg/hashing/math` via replace directive; no duplicate code |
 | ARC-3 | Schema loader | ✅ IMPLEMENTED |
 | ARC-4 | YAML config files | ✅ IMPLEMENTED |
 | ARC-5 | Schema-driven `packer.go` domain detection | ✅ IMPLEMENTED (`NewSchemaAwarePacker`) |
@@ -290,26 +284,29 @@ The binary calls `math.GetSubDomainName(subdomainVal)` for the startup log line.
 
 ## Remaining Work (Ordered by Priority)
 
-All blocking bugs, architecture items, and output format items are implemented. What remains:
+All blocking bugs, architecture, output format, and driver integration items are now complete. What remains:
 
-1. **Complete ARC-2 migration** — update `pkg/hashing/miner/math_miner.go` and `pkg/hashing/api/math_api.go` to accept a `Mapper` interface instead of importing `math.LaTeXMapper` directly. Once no callers remain, delete `pkg/hashing/math/latex_mapper.go`.
+1. **PRD-2 — BGE-Base embeddings** — wire `pipeline/2_DATA_ENCODER/pkg/embeddings/service.go` (Cloudflare BGE-Base) into `SchemaLaTeXMapper` and `SchemaVarianceMapper` for Slots 0–3. Currently both delegate to `math.GetSemanticAnchors` (polynomial hash); this is consistent but not semantically grounded.
 
-2. **PRD-2 — BGE-Base embeddings** — wire `pipeline/2_DATA_ENCODER/pkg/embeddings/service.go` (Cloudflare BGE-Base) into `SchemaLaTeXMapper` and `SchemaVarianceMapper` for Slots 0–3. Currently both use deterministic polynomial hashing as a placeholder; this produces consistent but not semantically grounded frames.
-
-3. **PRD-4 — `DetokenizedOutput`** — once the inference pipeline is wired end-to-end, replace the echo of raw input with the actual decoded output from the ASIC nonce lookup.
-
-4. **NEW-4 cleanup** — after ARC-2 migration is complete, replace the `math.GetSubDomainName` import in `math-verifier/main.go` with a lookup from the loaded schema's subdomain table.
+2. **PRD-4 — `DetokenizedOutput`** — once the inference pipeline is wired end-to-end, replace the echo of raw input in `MathVerifyResponse.DetokenizedOutput` with the actual decoded output from the ASIC nonce lookup.
 
 ---
 
-## Appendix: The Target End State (Unchanged)
+## Appendix: The Target End State
 
 ```bash
 # Run as General HASHER (prose mode)
 ./hasher-host --schema pipeline/2_DATA_ENCODER/config/prose_schema.yaml
 
-# Run as MATHASHER (math verification mode)
-./math-verifier --schema pipeline/2_DATA_ENCODER/config/math_schema.yaml
+# Run as MATHASHER (math verification mode) — same binary, different schema
+./hasher-host --schema pipeline/2_DATA_ENCODER/config/math_schema.yaml
 ```
 
-One binary per role. All bitmask specs, domain signatures, and validation rules come from the YAML file at runtime. No recompilation required to switch modes. The `pkg/hashing/` runtime packages contain only the ASIC loop, inference watchdog (loaded from schema), and API layer — no hardcoded domain knowledge.
+**One binary, schema-selected mode.** The `math-verifier` standalone driver has been deleted. `hasher-host` reads `domain.name` from the YAML at startup and, when it is `MATHASHER`, mounts `POST /v1/verify/math` and `GET /v1/verify/math/health` on the same gin router alongside the existing ASIC inference endpoints.
+
+**Single source of truth for tokenization.** `pipeline/2_DATA_ENCODER/pkg/mapper/schema_latex_mapper.go` no longer duplicates `hashContext`, `generateTemporalLock`, or the single-pass tokenizer. It imports `hasher/pkg/hashing/math` directly (via a monorepo `replace` directive in `go.mod`) and delegates to:
+- `math.LaTeXMapper.TokenizeLaTeX` — single-pass tokenizer
+- `math.GetSemanticAnchors` — slots 0–3 polynomial hash
+- `math.GenerateTemporalLock` — slot 11 temporal lock
+
+All bitmask specs, domain signatures, and validation rules come from the YAML file at runtime. No recompilation required to switch modes.

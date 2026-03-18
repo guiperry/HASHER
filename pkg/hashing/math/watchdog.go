@@ -15,8 +15,11 @@ type WatchdogRule struct {
 	ForbiddenNext []uint32 `yaml:"forbidden_next"`
 }
 
-// watchdogSchemaFile is the minimal YAML structure needed to extract rules.
+// watchdogSchemaFile is the minimal YAML structure needed to extract rules and domain.
 type watchdogSchemaFile struct {
+	Domain struct {
+		Name string `yaml:"name"`
+	} `yaml:"domain"`
 	ValidationRules []WatchdogRule `yaml:"validation_rules"`
 }
 
@@ -31,6 +34,20 @@ func LoadWatchdogRulesFromYAML(path string) ([]WatchdogRule, error) {
 		return nil, fmt.Errorf("watchdog schema parse: %w", err)
 	}
 	return schema.ValidationRules, nil
+}
+
+// LoadDomainFromSchema reads the domain.name field from a slot-schema YAML file.
+// It is used by the host binary to decide which mode (HASHER / MATHASHER) to activate.
+func LoadDomainFromSchema(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("schema load: %w", err)
+	}
+	var schema watchdogSchemaFile
+	if err := yaml.Unmarshal(data, &schema); err != nil {
+		return "", fmt.Errorf("schema parse: %w", err)
+	}
+	return schema.Domain.Name, nil
 }
 
 type ValidationResult struct {

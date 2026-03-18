@@ -3,6 +3,8 @@ package mapper
 import (
 	"fmt"
 	"regexp"
+
+	hashermath "hasher/pkg/hashing/math"
 )
 
 // compiledRole holds a pre-compiled set of patterns for a single Slot-4 role.
@@ -12,17 +14,22 @@ type compiledRole struct {
 }
 
 // SchemaLaTeXMapper implements Mapper for the MATHASHER domain.
-// Role detection patterns are compiled once at construction from the loaded SlotSchema.
+//
+// Tokenization is delegated to hasher/pkg/hashing/math.LaTeXMapper so the
+// single-pass splitting logic lives in one place.  Role detection is
+// schema-driven: patterns from the loaded SlotSchema override the runtime
+// hard-coded patterns, letting the same binary serve different math domains
+// by swapping YAML files.
 type SchemaLaTeXMapper struct {
-	schema         *SlotSchema
-	compiledRoles  []compiledRole
-	cmdRe          *regexp.Regexp
+	schema        *SlotSchema
+	compiledRoles []compiledRole
+	latexMapper   *hashermath.LaTeXMapper // canonical tokenizer from the runtime package
 }
 
 func NewSchemaLaTeXMapper(schema *SlotSchema) *SchemaLaTeXMapper {
 	m := &SchemaLaTeXMapper{
-		schema: schema,
-		cmdRe:  regexp.MustCompile(`\\[a-zA-Z]+`),
+		schema:      schema,
+		latexMapper: hashermath.NewLaTeXMapper(0),
 	}
 
 	for _, role := range schema.Slot4Roles {
@@ -30,7 +37,7 @@ func NewSchemaLaTeXMapper(schema *SlotSchema) *SchemaLaTeXMapper {
 		for _, pat := range role.Patterns {
 			re, err := regexp.Compile(pat)
 			if err != nil {
-				// Skip invalid patterns rather than panicking — log for visibility
+				// Skip invalid patterns — log for visibility rather than panicking.
 				fmt.Printf("Warning: invalid pattern %q for role %s: %v\n", pat, role.Name, err)
 				continue
 			}
@@ -48,21 +55,24 @@ func (m *SchemaLaTeXMapper) Map(input string) (NeuralFrame, error) {
 
 	slots[10] = m.schema.Domain.Slot10Base
 
-	tokens := m.tokenize(input)
+	// Tokenize using the canonical runtime tokenizer (single source of truth).
+	tokens := m.latexMapper.TokenizeLaTeX(input)
 	if len(tokens) > 0 {
 		last := tokens[len(tokens)-1]
-		slots[4] = m.detectRole(last)
+		// Re-classify the last token with schema-driven patterns.
+		slots[4] = m.detectRole(last.Text)
 	}
 
-	for i := range 4 {
-		slots[i] = hashContext(input, i)
-	}
-	slots[11] = generateTemporalLock(input)
+	// Slots 0–3: semantic anchors (hash-based until BGE-Base embeddings are wired).
+	slots[0], slots[1], slots[2], slots[3] = hashermath.GetSemanticAnchors(input)
+
+	// Slot 11: temporal lock.
+	slots[11] = hashermath.GenerateTemporalLock(input)
 
 	return NeuralFrame{
-		Slots:    slots,
+		Slots:     slots,
 		SourceRef: input,
-		Metadata: map[string]interface{}{"domain": m.schema.Domain.Name},
+		Metadata:  map[string]interface{}{"domain": m.schema.Domain.Name},
 	}, nil
 }
 
@@ -70,74 +80,7 @@ func (m *SchemaLaTeXMapper) Schema() *SlotSchema {
 	return m.schema
 }
 
-// tokenize performs a single-pass extraction: LaTeX commands are identified
-// before normalization so their backslash prefixes are available for pattern matching.
-func (m *SchemaLaTeXMapper) tokenize(input string) []string {
-	if input == "" {
-		return nil
-	}
-
-	var tokens []string
-	lastEnd := 0
-
-	for _, loc := range m.cmdRe.FindAllStringIndex(input, -1) {
-		// Plain text before this command
-		for _, t := range splitPlain(input[lastEnd:loc[0]]) {
-			if t != "" {
-				tokens = append(tokens, t)
-			}
-		}
-		// The command itself (backslash retained)
-		tokens = append(tokens, input[loc[0]:loc[1]])
-		lastEnd = loc[1]
-	}
-
-	// Remaining plain text
-	for _, t := range splitPlain(input[lastEnd:]) {
-		if t != "" {
-			tokens = append(tokens, t)
-		}
-	}
-
-	if len(tokens) == 0 && input != "" {
-		tokens = []string{input}
-	}
-
-	return tokens
-}
-
-// splitPlain breaks a plain (backslash-free) string on whitespace and operator boundaries.
-func splitPlain(s string) []string {
-	if s == "" {
-		return nil
-	}
-	// Reuse the same boundary characters as the runtime tokenizer
-	var out []string
-	cur := ""
-	for _, r := range s {
-		switch {
-		case r == ' ' || r == '\t' || r == '\n':
-			if cur != "" {
-				out = append(out, cur)
-				cur = ""
-			}
-		case r == '(' || r == ')' || r == '[' || r == ']' || r == '{' || r == '}':
-			if cur != "" {
-				out = append(out, cur)
-				cur = ""
-			}
-			out = append(out, string(r))
-		default:
-			cur += string(r)
-		}
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
-}
-
-// detectRole returns the Slot-4 role ID for a token using pre-compiled schema patterns.
+// detectRole returns the Slot-4 role ID for token using pre-compiled schema patterns.
 // Patterns are checked in schema order (FUNCTION before VARIABLE avoids misclassification).
 func (m *SchemaLaTeXMapper) detectRole(token string) uint32 {
 	for _, cr := range m.compiledRoles {
@@ -150,37 +93,17 @@ func (m *SchemaLaTeXMapper) detectRole(token string) uint32 {
 	return 0x01 // fallback: VARIABLE
 }
 
-// hashContext and generateTemporalLock are defined here to avoid importing the
-// runtime math package (separate module boundary).
-func hashContext(s string, slot int) uint32 {
-	h := uint32(len(s))
-	for i, c := range s {
-		rot := uint32(c) << ((i + slot*3) % 24)
-		h = h*31 + rot
-	}
-	return h
-}
-
-func generateTemporalLock(s string) uint32 {
-	h := uint32(0)
-	for i, c := range s {
-		h += uint32(c) * uint32(i+1)
-	}
-	return h ^ 0xCAFEBABE
-}
-
 // SchemaVarianceMapper implements Mapper for the general HASHER prose domain.
-// When a real BGE-Base embedding is not available, Slots 0–3 are filled with a
-// deterministic hash of the input — consistent but not semantically grounded.
-// Wire to VarianceMapper.MapToSlots once the embeddings service is integrated.
+// Slots 0–3 use the same deterministic hash as the runtime LaTeXMapper until the
+// BGE-Base embedding service is integrated.
 type SchemaVarianceMapper struct {
-	schema        *SlotSchema
+	schema         *SlotSchema
 	varianceMapper *VarianceMapper
 }
 
 func NewSchemaVarianceMapper(schema *SlotSchema) *SchemaVarianceMapper {
 	return &SchemaVarianceMapper{
-		schema:        schema,
+		schema:         schema,
 		varianceMapper: NewDefaultVarianceMapper(),
 	}
 }
@@ -193,19 +116,17 @@ func NewSchemaVarianceMapper(schema *SlotSchema) *SchemaVarianceMapper {
 func (m *SchemaVarianceMapper) Map(input string) (NeuralFrame, error) {
 	var slots [12]uint32
 
-	// Slots 0–3: hash-based semantic anchors (BGE-Base integration pending)
-	for i := range 4 {
-		slots[i] = hashContext(input, i)
-	}
+	// Slots 0–3: hash-based semantic anchors (BGE-Base integration pending).
+	slots[0], slots[1], slots[2], slots[3] = hashermath.GetSemanticAnchors(input)
 
-	// Slot 10: domain from schema
+	// Slot 10: domain from schema.
 	slots[10] = m.schema.Domain.Slot10Base
 
-	// Slot 11: temporal lock
-	slots[11] = generateTemporalLock(input)
+	// Slot 11: temporal lock.
+	slots[11] = hashermath.GenerateTemporalLock(input)
 
 	return NeuralFrame{
-		Slots:    slots,
+		Slots:     slots,
 		SourceRef: input,
 		Metadata: map[string]interface{}{
 			"domain": m.schema.Domain.Name,
