@@ -57,12 +57,6 @@ var AvailableBinaries = []BinaryInfo{
 		TargetOS:    "linux",
 		TargetArch:  "amd64",
 	},
-	{
-		Name:        "math-verifier",
-		Description: "Math Verifier - Mathematical derivation verification service (MATHASHER)",
-		TargetOS:    "linux",
-		TargetArch:  "amd64",
-	},
 }
 
 // GetAppDataDir returns the OS-specific application data directory

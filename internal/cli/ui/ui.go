@@ -2591,6 +2591,15 @@ func (m Model) runDataPipeline() tea.Cmd {
 
 func (m Model) runMathVerifier() tea.Cmd {
 	return func() tea.Msg {
+		// Use hasher-host binary with --schema flag to activate MATHASHER mode.
+		hostPath, err := embedded.GetHasherHostPathForce()
+		if err != nil {
+			return PipelineCompleteMsg{
+				Success: false,
+				Message: fmt.Sprintf("Failed to extract hasher-host: %v", err),
+			}
+		}
+
 		binDir, err := embedded.GetBinDir()
 		if err != nil {
 			return PipelineCompleteMsg{
@@ -2599,34 +2608,87 @@ func (m Model) runMathVerifier() tea.Cmd {
 			}
 		}
 
-		binaryPath := filepath.Join(binDir, "math-verifier")
-
-		// Check if binary exists
-		if _, err := os.Stat(binaryPath); err != nil {
-			// Try to extract from embedded
-			binaryPath, err = embedded.GetBinaryPath("math-verifier")
-			if err != nil {
+		// Locate math schema: check binDir first, then the pipeline config directory.
+		schemaPath := filepath.Join(binDir, "math_schema.yaml")
+		if _, err := os.Stat(schemaPath); err != nil {
+			// Fall back to the source-tree config (dev / non-embedded builds).
+			cwd, _ := os.Getwd()
+			schemaPath = filepath.Join(cwd, "pipeline", "2_DATA_ENCODER", "config", "math_schema.yaml")
+			if _, err := os.Stat(schemaPath); err != nil {
 				return PipelineCompleteMsg{
 					Success: false,
-					Message: fmt.Sprintf("math-verifier binary not found: %v", err),
+					Message: fmt.Sprintf("math_schema.yaml not found in %s or pipeline config: %v", binDir, err),
 				}
 			}
 		}
 
-		mode := m.DataVerificationMode
-		if mode == "mathematical" {
-			return PipelineProgressMsg{
-				Stage:      "math-verifier",
-				Progress:   0,
-				Log:        fmt.Sprintf("[%s] ▶️ Starting MATHASHER math verification server...", time.Now().Format("15:04:05")),
-				StageIndex: 0,
+		args := []string{"--schema=" + schemaPath}
+
+		// Mirror device / network args from startHasherHost so MATHASHER mode
+		// honours the same device configuration.
+		deviceConfig, _ := config.LoadDeviceConfig()
+		if deviceConfig != nil && deviceConfig.IP != "" {
+			args = append(args, "--device="+deviceConfig.IP)
+			args = append(args, "--discover=false")
+			args = append(args, "--force-redeploy=true")
+			if deviceConfig.Password != "" {
+				args = append(args, "--server-ssh-password="+deviceConfig.Password)
+			}
+		} else {
+			args = append(args, "--discover=true")
+			args = append(args, "--auto-deploy=true")
+		}
+		if deviceConfig != nil && deviceConfig.FramesDir != "" {
+			args = append(args, "--frames-dir="+deviceConfig.FramesDir)
+		}
+		if deviceConfig != nil && deviceConfig.CGMinerHost != "" {
+			args = append(args, "--cgminer-host="+deviceConfig.CGMinerHost)
+		}
+
+		cmd := exec.Command(hostPath, args...)
+		cmd.Dir = binDir
+		cmd.Env = os.Environ()
+		if deviceConfig != nil {
+			if deviceConfig.IP != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_IP="+deviceConfig.IP)
+			}
+			if deviceConfig.Password != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_PASSWORD="+deviceConfig.Password)
+			}
+			if deviceConfig.Username != "" {
+				cmd.Env = append(cmd.Env, "DEVICE_USERNAME="+deviceConfig.Username)
 			}
 		}
 
-		// Semantic mode falls back to regular pipeline
-		return PipelineCompleteMsg{
-			Success: true,
-			Message: fmt.Sprintf("Data verification mode '%s' started", mode),
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return PipelineCompleteMsg{Success: false, Message: fmt.Sprintf("Failed to create stdout pipe: %v", err)}
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return PipelineCompleteMsg{Success: false, Message: fmt.Sprintf("Failed to create stderr pipe: %v", err)}
+		}
+
+		if err := cmd.Start(); err != nil {
+			return PipelineCompleteMsg{
+				Success: false,
+				Message: fmt.Sprintf("Failed to start MATHASHER server: %v", err),
+			}
+		}
+
+		pipelineState.Mu.Lock()
+		pipelineState.Cmd = cmd
+		pipelineState.Running = true
+		pipelineState.Mu.Unlock()
+
+		// Stream stdout/stderr through the pipeline log channel.
+		mathStage := PipelineStage{Name: "MATHASHER", BinName: "hasher-host", Desc: "Math verification server"}
+		go m.streamPipelineOutput(cmd, stdout, stderr, 0, mathStage)
+
+		return PipelineLogMsg{
+			Log:        fmt.Sprintf("[%s] ▶️ Starting MATHASHER server (hasher-host --schema=%s)...", time.Now().Format("15:04:05"), schemaPath),
+			StageIndex: 0,
+			Stage:      "MATHASHER",
 		}
 	}
 }
