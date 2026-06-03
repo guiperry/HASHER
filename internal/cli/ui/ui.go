@@ -626,6 +626,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.ServerLogs = m.ServerLogs[len(m.ServerLogs)-50:]
 				}
 				m.updateLogView()
+				// Check if server is ready and trigger health check
+				if strings.Contains(log, "hasher-host is ready!") {
+					cmds = append(cmds, m.checkServerHealth())
+				}
 			default:
 				// No log available, just continue
 			}
@@ -3261,9 +3265,10 @@ func (m *Model) startHasherHost() tea.Cmd {
 				if err == nil {
 					port, err := strconv.Atoi(strings.TrimSpace(string(portBytes)))
 					if err == nil && isHasherHostRunning(port) {
-						m.ServerReady = true
-						m.ServerStarting = false
-						m.APIClient = client.NewAPIClient(port)
+						select {
+						case m.LogChan <- "hasher-host is ready!\n":
+						default:
+						}
 						return
 					}
 				}
